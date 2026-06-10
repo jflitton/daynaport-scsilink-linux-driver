@@ -10,7 +10,8 @@ Tested on i386 / Adaptec AHA-1542 / BlueSCSI V2.
 
 ## Install
 
-Downloads from the [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases) page
+Download the latest release tarball from the [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases) page
+or clone this repo.
 
 Needs the target's configured kernel source (default `/usr/src/linux`, matching
 the running kernel) and the period gcc (2.7.x). As root:
