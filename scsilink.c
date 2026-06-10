@@ -87,28 +87,17 @@
 #define SCSILINK_MAXFRAME		ETH_FRAME_LEN	/* 1514, no FCS */
 #define SCSILINK_RX_MAXREC		(SCSILINK_MAXFRAME + SCSILINK_FCS_LEN)
 
-/* Length we request in the READ CDB = one max record (header + frame + FCS).
- * BlueSCSI uses this only to bound the batch: its guard "total + 1524 + 6 > size
- * -> stop" (network.c) forces exactly one frame per READ whenever size < ~3060,
- * which 1524 does.  NetBSD dse requests the same 1524.
- *
- * Tried 2-frame batching on real HW (i486/AHA-1542/BlueSCSI, 2026-06-08): raised
- * this to 4096 so BlueSCSI's guard left room for its own 2-frame cap.  Result:
- * throughput unchanged within noise (37 vs 39 kB/s), zero RX errors.  Reverted --
- * frames-per-READ is not the bottleneck here:
- *   - at download rates the RX ring rarely holds 2 frames at poll time, so batch
- *     mode mostly still sent 1; when it sent 2, BlueSCSI's 300us inter-packet
- *     delay (network.c) offset the saved per-transaction overhead.
- *   - the real limiter is structural: cmd_per_lun=1 serialises RX vs TX-ACKs,
- *     fixed per-READ SCSI + firmware-delay overhead, and a ~20ms inter-READ gap
- *     (SCSILINK_POLL0) that the more_pending fast-drain can't shorten, because
- *     BlueSCSI's final record always carries flag 0x00 -- it never signals
- *     "ring still has data" (network.c:305), so more_pending is always 0 here. */
-#define SCSILINK_RX_REQ		(SCSILINK_RX_HDR + SCSILINK_RX_MAXREC)	/* 1524 */
+/* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
+ * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
+ * (network.c, DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its
+ * bus-hold guard.  Requesting one record (1524) forces a single frame; 4096
+ * leaves room for two.
+ */
+#define SCSILINK_RX_REQ		4096	/* room for BlueSCSI's 2-frame batch */
 
-/* RX SCSI transfer (DMA) buffer.  Generous like NetBSD's; the device sends only
- * one frame (capped by SCSILINK_RX_REQ) so the transfer underruns this harmlessly.
- * MUST be GFP_DMA for the AHA-1542 (24-bit ISA DMA). */
+/* RX SCSI transfer (DMA) buffer.  Generous like NetBSD's; the device sends at most
+ * a 2-frame batch (capped by SCSILINK_RX_REQ + BlueSCSI's guard) so the transfer
+ * underruns this harmlessly.  MUST be GFP_DMA for the AHA-1542 (24-bit ISA DMA). */
 #define SCSILINK_RBUF_LEN		16384
 #define SCSILINK_TBUF_LEN		1536	/* one frame + slack */
 
@@ -362,7 +351,7 @@ static void scsilink_rx_kick(unsigned long arg)
 	cmd[0] = SCSILINK_CMD_RECV;
 	cmd[1] = 0;
 	cmd[2] = 0;
-	cmd[3] = (SCSILINK_RX_REQ >> 8) & 0xff;	/* one frame/READ (BlueSCSI cap) */
+	cmd[3] = (SCSILINK_RX_REQ >> 8) & 0xff;	/* request up to a 2-frame batch */
 	cmd[4] = SCSILINK_RX_REQ & 0xff;
 	cmd[5] = SCSILINK_RECV_FLAG;
 
