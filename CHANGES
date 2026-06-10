@@ -1,0 +1,6 @@
+DaynaPORT SCSI/Link Linux driver -- change history
+
+0.1  2026-06-09
+     Initial release.
+     - Builds as a loadable module against any configured Linux 2.0.x kernel
+     Driver tested on i386 / Adaptec AHA-1542 / BlueSCSI V2.

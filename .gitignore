@@ -1,0 +1,6 @@
+# build products
+*.o
+
+# release artifacts (built by make-release.sh; published as GitHub release assets)
+scsilink-*.tar.gz
+scsilink-*/
