@@ -5,7 +5,7 @@ adapter on **Linux 2.0.x**, as emulated by [BlueSCSI V2](https://bluescsi.com/),
 exposes it as a standard Ethernet interface (`eth0`). Builds out-of-tree as a
 loadable module (`scsilink.o`) against any 2.0.x kernel source.
 
-Tested on i386 / Adaptec AHA-1542 / BlueSCSI V2.
+Tested on i386 / Adaptec AHA-1542 / BlueSCSI V2 release v2026.04.27.
 
 ## Install
 
@@ -40,9 +40,18 @@ route add default gw 192.168.1.1
 ```
 
 ## Performance
-Download performance is limited to about 40kB/sec, due to the fact that receives aren't
-interrupt-driven, we have to poll for them.  Upload performance is 3-4x better as we
-do have the benefit of interrupts when packets are sent.
+Download performance is about 70kB/sec on a 486/33, limited by the fact that receives
+aren't interrupt-driven -- we have to poll for them.  Upload performance is 3-4x better
+as we do have the benefit of interrupts when packets are sent.
+
+The RX poll cadence can be tuned at load time (milliseconds) without rebuilding:
+
+```sh
+insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16   # these are the defaults
+```
+
+`poll_ms` is the idle interval, `poll0_ms` the interval while data is flowing, and
+`fast_hold` how many empty polls to stay at the fast rate before relaxing to idle.
 
 ## Files
 

@@ -1,5 +1,14 @@
 DaynaPORT SCSI/Link Linux driver -- change history
 
+0.3  2026-06-11
+      - RX poll cadence is now tunable via bare module parameters (milliseconds),
+        so it can be swept at load time without rebuilding:
+          insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16
+        Defaults reproduce v0.2 timing and seem approximately optimal for a 486@33Mhz
+        based on real-world testing with a BlueSCSI v2
+      - RX: drop the unused device flag-field handling; record parsing relies on
+        the zero-length terminator alone.
+
 0.2  2026-06-09
      - RX: batch up to 2 frames per READ(6) (SCSILINK_RX_REQ 1524 -> 4096),
        ~75% speed increase.
@@ -7,4 +16,3 @@ DaynaPORT SCSI/Link Linux driver -- change history
 0.1  2026-06-09
      Initial release.
      - Builds as a loadable module against any configured Linux 2.0.x kernel
-     Driver tested on i386 / Adaptec AHA-1542 / BlueSCSI V2.
