@@ -9,7 +9,7 @@
  * per-frame delivery -- which necessarily touches each era's network stack --
  * is supplied by the caller as a callback.
  *
- * Protocol reference: docs/daynaport.md.
+ * Protocol reference: reference/daynaport.md.
  */
 
 #ifndef DAYNAPORT_H

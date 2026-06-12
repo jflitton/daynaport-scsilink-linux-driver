@@ -71,7 +71,7 @@
 
 /* DaynaPORT SCSI opcodes, command flags, and RX framing constants live in the
  * shared, version-independent "daynaport.h" (included above; see
- * docs/daynaport.md).  The driver-policy tunables below stay here. */
+ * reference/daynaport.md).  The driver-policy tunables below stay here. */
 
 /* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
  * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
@@ -505,7 +505,7 @@ static struct enet_statistics *scsilink_get_stats(struct device *dev)
 
 /* v1: no multicast filtering.  BlueSCSI ignores 0x0D and 2.0f receives all
  * broadcast anyway; and this hook may run where we cannot sleep to issue a
- * SCSI command.  See reference/linux-2.0.md s7.5. */
+ * SCSI command.  See reference/daynaport.md s4.6. */
 static void scsilink_set_multicast(struct device *dev)
 {
 }
