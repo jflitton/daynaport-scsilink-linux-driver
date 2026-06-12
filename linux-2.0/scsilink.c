@@ -61,29 +61,17 @@
 #include "scsi.h"			/* pulls in <scsi/scsi.h> and hosts.h */
 #include "hosts.h"
 
+#include "daynaport.h"			/* shared DaynaPORT protocol defs + RX parser */
+
 /* ----------------------------------------------------------------------- *
  *  Tunables / constants
  * ----------------------------------------------------------------------- */
 
 #define SCSILINK_MAX		4	/* max DaynaPORT interfaces we manage */
 
-/* DaynaPORT SCSI opcodes (see reference/daynaport.md) */
-#define SCSILINK_CMD_RECV		0x08	/* READ(6)  - receive */
-#define SCSILINK_CMD_STATS		0x09	/* retrieve MAC + stats (18 bytes) */
-#define SCSILINK_CMD_SEND		0x0A	/* WRITE(6) - transmit */
-#define SCSILINK_CMD_ENABLE	0x0E	/* enable/disable interface */
-
-#define SCSILINK_STATS_LEN		0x12	/* 18 bytes: 6 MAC + 3x4 counters */
-#define SCSILINK_ENABLE_FLAG	0x80	/* cdb[5] for enable */
-#define SCSILINK_RECV_FLAG		0xC0	/* cdb[5] for READ: blind mode (per NetBSD dse) */
-#define SCSILINK_SEND_FLAG		0x00	/* cdb[5] for WRITE: raw frame format */
-
-/* RX framing: 2-byte big-endian length + 4-byte flag field per packet */
-#define SCSILINK_RX_HDR		6
-#define SCSILINK_FCS_LEN		4	/* trailing Ethernet FCS, stripped */
-#define SCSILINK_MINFRAME		60	/* pad short TX frames to this */
-#define SCSILINK_MAXFRAME		ETH_FRAME_LEN	/* 1514, no FCS */
-#define SCSILINK_RX_MAXREC		(SCSILINK_MAXFRAME + SCSILINK_FCS_LEN)
+/* DaynaPORT SCSI opcodes, command flags, and RX framing constants live in the
+ * shared, version-independent "daynaport.h" (included above; see
+ * docs/daynaport.md).  The driver-policy tunables below stay here. */
 
 /* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
  * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
@@ -263,9 +251,15 @@ static int scsilink_scsi_sync(struct scsilink *dp, unsigned char *cdb,
  *  Receive
  * ----------------------------------------------------------------------- */
 
-/* Hand one frame (FCS already stripped) up to the stack. */
-static void scsilink_rx_one(struct scsilink *dp, unsigned char *frame, int len)
+/*
+ * Deliver one frame (FCS already stripped) up to the stack.  This is the
+ * version-specific half of the RX path: the record-walking lives in the shared
+ * daynaport_rx_parse() (daynaport.h), which invokes this callback once per good
+ * frame.  ctx is our per-interface state.
+ */
+static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
 {
+	struct scsilink *dp = (struct scsilink *) ctx;
 	struct sk_buff *skb;
 
 	skb = dev_alloc_skb(len + 2);
@@ -282,58 +276,19 @@ static void scsilink_rx_one(struct scsilink *dp, unsigned char *frame, int len)
 }
 
 /*
- * Parse a READ response.  Each record is:
- *   [2-byte BE length][4-byte flag field][length bytes of frame incl 4-byte FCS]
- *
- * Per the Dayna command set, the flag field's low byte is 0x10 ("more packets
- * available in device memory") or 0x00 ("last packet"), and a zero-length
- * header terminates the response.
- *
- * In practice the flag scopes to the response, not the device's whole queue.
- * BlueSCSI and ZuluSCSI share the same SCSI2SD-derived network.c and both emit
- * data[5] = (done ? 0 : 0x10): 0x10 = "another record follows in THIS response,"
- * 0x00 = "last record of it."  Since "done" is also set by a per-READ byte cap
- * (~2 max frames), a response can end -- last record 0x00 -- while the device's
- * ring still holds frames (self-consistent if you read it as a device draining a
- * small per-transaction buffer).  So neither value is a cross-READ signal: 0x10
- * means only "another record follows in this same response," and 0x00 only
- * "this response is over" -- NOT "the device's ring is empty."  The flag
- * reliably delimits records within one response, but says nothing about whether
- * another READ is worthwhile.
- *
- * We therefore ignore the flag and terminate on the zero-length header: the
- * caller pre-zeroes the buffer, so the bytes just past the device's data read
- * back as a length-0 header and stop us cleanly.  (We cannot instead bound the
- * buffer by the AHA-1542's residual; it reports the device's early end of the
- * DATA-IN phase as a short transfer.)  Returns packet count.
+ * Parse a READ response out of the (pre-zeroed) RX buffer, delivering each frame
+ * via scsilink_deliver().  The walk itself -- record framing, the zero-length
+ * terminator, why the device's "more" flag is ignored -- lives in the shared
+ * daynaport_rx_parse() (daynaport.h).  Returns the packet count.
  */
 static int scsilink_rx(struct scsilink *dp)
 {
-	unsigned char *p = dp->rbuf;
-	int avail = SCSILINK_RBUF_LEN;
-	int n = 0, len;
+	int errors = 0;
+	int n;
 
-	while (avail >= SCSILINK_RX_HDR) {
-		len  = (p[0] << 8) | p[1];	/* big-endian, incl FCS */
-		p     += SCSILINK_RX_HDR;
-		avail -= SCSILINK_RX_HDR;
-
-		if (len == 0)			/* zeroed tail / no (more) data */
-			break;
-
-		if (len < SCSILINK_MINFRAME + SCSILINK_FCS_LEN || len > SCSILINK_RX_MAXREC) {
-			dp->stats.rx_errors++;	/* garbled record; bail out */
-			break;
-		}
-		if (len > avail)		/* would run off the buffer */
-			break;
-
-		scsilink_rx_one(dp, p, len - SCSILINK_FCS_LEN);
-		n++;
-
-		p     += len;
-		avail -= len;
-	}
+	n = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+			       scsilink_deliver, dp, &errors);
+	dp->stats.rx_errors += errors;
 	return n;
 }
 
