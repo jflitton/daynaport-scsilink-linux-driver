@@ -279,17 +279,19 @@ static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
  * Parse a READ response out of the (pre-zeroed) RX buffer, delivering each frame
  * via scsilink_deliver().  The walk itself -- record framing, the zero-length
  * terminator, why the device's "more" flag is ignored -- lives in the shared
- * daynaport_rx_parse() (daynaport.h).  Returns the packet count.
+ * daynaport_rx_parse() (daynaport.h).  Returns the unicast (to-us) frame count
+ * -- the fast/idle cadence keys off that, so broadcast/multicast chatter is
+ * delivered but does not pin us in fast-poll.
  */
 static int scsilink_rx(struct scsilink *dp)
 {
 	int errors = 0;
-	int n;
+	int ucast = 0;
 
-	n = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
-			       scsilink_deliver, dp, &errors);
+	daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+			   scsilink_deliver, dp, &errors, &ucast);
 	dp->stats.rx_errors += errors;
-	return n;
+	return ucast;
 }
 
 /* RX poll timer: issue a READ(6).  Bottom-half context - must not sleep. */
@@ -364,9 +366,10 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 		return;
 
 	/*
-	 * Re-arm the poll:
-	 *  - got data this time        -> fast rate, and hold fast for a while
-	 *  - empty but recently active -> stay fast (window-breathing gap)
+	 * Re-arm the poll (cadence keys off UNICAST frames -- those for us;
+	 * broadcast/multicast is delivered but does not sustain fast-poll):
+	 *  - unicast for us            -> fast rate, and hold fast for a while
+	 *  - none but recently active  -> stay fast (window-breathing gap)
 	 *  - idle                      -> idle rate
 	 */
 	if (n > 0) {

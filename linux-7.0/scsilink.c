@@ -182,13 +182,15 @@ static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
  * Issue one READ(6) and deliver whatever frames come back.  The DaynaPORT ends
  * the DATA-IN phase early (variable-length responses), which the HBA reports as
  * a short transfer -- so we trust the self-describing, length-checked buffer
- * rather than the SCSI result and parse regardless.  Returns the packet count.
+ * rather than the SCSI result and parse regardless.  Returns the unicast
+ * (to-us) frame count -- the fast/idle cadence keys off that, so broadcast and
+ * multicast chatter is delivered but does not pin us in fast-poll.
  */
 static int scsilink_rx_poll(struct scsilink *dp)
 {
 	unsigned char cdb[6];
 	int errors = 0;
-	int n;
+	int ucast = 0;
 
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how daynaport_rx_parse() knows
@@ -205,10 +207,10 @@ static int scsilink_rx_poll(struct scsilink *dp)
 
 	scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, dp->rbuf, SCSILINK_RBUF_LEN);
 
-	n = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
-			       scsilink_deliver, dp, &errors);
+	daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+			   scsilink_deliver, dp, &errors, &ucast);
 	dp->dev->stats.rx_errors += errors;
-	return n;
+	return ucast;
 }
 
 /* ----------------------------------------------------------------------- *
@@ -279,9 +281,10 @@ static int scsilink_poll_thread(void *arg)
 		if (netif_queue_stopped(dp->dev))
 			netif_wake_queue(dp->dev);
 
-		/* One RX poll.  Track the fast/idle cadence:
-		 *  - got data        -> fast rate, and hold fast for fast_hold polls
-		 *  - empty, holding   -> stay fast (window-breathing gap)
+		/* One RX poll.  The cadence keys off UNICAST traffic (frames for
+		 * us); broadcast/multicast is delivered but does not sustain fast-poll:
+		 *  - unicast for us   -> fast rate, and hold fast for fast_hold polls
+		 *  - none, holding    -> stay fast (window-breathing gap)
 		 *  - idle             -> idle rate
 		 */
 		n = scsilink_rx_poll(dp);

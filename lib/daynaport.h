@@ -58,12 +58,18 @@ typedef void (*daynaport_deliver_fn)(void *ctx, const unsigned char *frame, int 
  *   errors      if non-NULL, incremented by 1 when a garbled record is seen (the
  *               walk then stops); lets the caller fold it into its own stats
  *               without this code knowing the stats representation.
+ *   unicast     if non-NULL, incremented for each frame addressed to a single
+ *               station (Ethernet group bit clear).  The DaynaPORT only ever
+ *               delivers an initiator its own unicast plus broadcast/multicast,
+ *               so this is effectively "frames that were really for us" -- the
+ *               signal an adaptive RX poll should accelerate on, so ambient
+ *               broadcast/multicast chatter does not pin it in fast-poll.
  *
  * Returns the number of frames delivered.
  */
 static int daynaport_rx_parse(const unsigned char *buf, int buflen,
 			      daynaport_deliver_fn deliver, void *ctx,
-			      int *errors)
+			      int *errors, int *unicast)
 {
 	const unsigned char *p = buf;
 	int avail = buflen;
@@ -90,6 +96,8 @@ static int daynaport_rx_parse(const unsigned char *buf, int buflen,
 
 		deliver(ctx, p, len - SCSILINK_FCS_LEN);
 		n += 1;
+		if (unicast && !(p[0] & 0x01))	/* group bit clear -> unicast (for us) */
+			*unicast += 1;
 
 		p     += len;
 		avail -= len;

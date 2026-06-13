@@ -49,7 +49,7 @@ applies equally to a real DaynaPort, BlueSCSI, ZuluSCSI, and PiSCSI.
 | Block / transfer model | packet-at-a-time via READ(6)/WRITE(6) — NOT block storage |
 
 Because it enumerates as a **Processor device (type 3)**, the standard Linux disk
-upper-layer (`sd`) will *not* claim it. Our driver must recognise it by INQUIRY
+upper-layer (`sd`) will *not* claim it. Our driver must recognize it by INQUIRY
 type 0x03 + vendor/product strings (below) and bind a `net_device` to it.
 
 **Discovery — the driver must find the device, not assume an ID.** Since the ID is
@@ -159,7 +159,7 @@ CDB:  08 00 00 LL LL XX
 - `LLLL` is a **16-bit big-endian** max transfer length: `CDB[3]<<8 | CDB[4]`.
 - **Control byte (CDB[5]) — the `0x40` bit selects single- vs multi-packet:**
   - `0x80` (bit 6 *clear*): **polled mode** (old SCSI Manager / virtual memory
-    present). Device returns **one packet per READ(6)** to minimise SCSI bus hold
+    present). Device returns **one packet per READ(6)** to minimize SCSI bus hold
     time so the VM pager can use the bus between transactions.
   - `0xC0` (bit 6 *set*): **blind mode** (new SCSI Manager, no VM). Device may
     pack **multiple packets into a single READ(6)** response (see batching below).
