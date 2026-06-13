@@ -17,11 +17,8 @@ only what is genuinely version-independent (the DaynaPORT protocol logic).
 
 | Kernel target | Directory                | Status                              | Driver version |
 |---------------|--------------------------|-------------------------------------|----------------|
-| Linux 2.0.x   | [`linux-2.0/`](linux-2.0/) | Working — tested on i386 / AHA-1542 / BlueSCSI V2 | 0.3 |
-| Linux 7.x     | `linux-7.0/` *(planned)*   | Not started                         | —              |
-
-Intermediary targets (2.2, 2.4, 2.6, 3.x, …) are planned to bridge the 2.0
-original and the 7.0 port.
+| Linux 2.0.x   | [`linux-2.0/`](linux-2.0/) | Working — tested on 486SLC @ 33MHz / AHA-1542 / BlueSCSI V2 | 0.3 |
+| Linux 7.x     | [`linux-7.0/`](linux-7.0/) | Working — tested on x86-64 / 53c875 (FirePort 40) / BlueSCSI V2 | 0.1 |
 
 ## Repository layout
 
@@ -35,11 +32,16 @@ original and the 7.0 port.
 │   ├── daynaport.md   # DaynaPORT opcode / framing reference
 │   └── SLINKCMD.TXT   # Dayna's original SCSI/Link command set
 ├── make-release.sh    # package one target into a self-contained tarball
-└── linux-2.0/         # the Linux 2.0.x driver (build/install instructions inside)
+├── linux-2.0/         # the Linux 2.0.x driver (build/install instructions inside)
+│   ├── scsilink.c     # #includes the shared lib/daynaport.h
+│   ├── Makefile
+│   ├── install.sh
+│   ├── README.md
+│   └── CHANGES
+└── linux-7.0/         # the Linux 7.x driver (out-of-tree kbuild module)
     ├── scsilink.c     # #includes the shared lib/daynaport.h
-    ├── Makefile
+    ├── Makefile       # kbuild: obj-m, -I../lib
     ├── install.sh
-    ├── README.md
     └── CHANGES
 ```
 
@@ -51,13 +53,19 @@ callback that hands packets up the era's network stack.
 
 ## Build & install
 
-See the README inside the target directory for that kernel — e.g.
-[`linux-2.0/README.md`](linux-2.0/README.md). In short:
+Each driver builds out-of-tree from inside its own directory, and both install
+the same way (`./install.sh`, as root). For Linux 2.0 specifics see
+[`linux-2.0/README.md`](linux-2.0/README.md):
 
 ```sh
-cd linux-2.0
+cd linux-7.0          # or linux-2.0
 ./install.sh          # build, install, depmod (as root)
 ```
+
+The Linux 7.x driver builds as `scsilink.ko` via kbuild against the running
+kernel's build tree (`/lib/modules/$(uname -r)/build`); load it with `modprobe
+scsilink`. The RX poll cadence is tunable at load — e.g. `modprobe scsilink
+poll_ms=80 poll0_ms=20 fast_hold=16`.
 
 Pre-built release tarballs are on the
 [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases)
