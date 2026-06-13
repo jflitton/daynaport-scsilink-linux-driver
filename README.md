@@ -42,6 +42,7 @@ only what is genuinely version-independent (the DaynaPORT protocol logic).
     ├── scsilink.c     # #includes the shared lib/daynaport.h
     ├── Makefile       # kbuild: obj-m, -I../lib
     ├── install.sh
+    ├── README.md
     └── CHANGES
 ```
 
@@ -53,19 +54,15 @@ callback that hands packets up the era's network stack.
 
 ## Build & install
 
-Each driver builds out-of-tree from inside its own directory, and both install
-the same way (`./install.sh`, as root). For Linux 2.0 specifics see
-[`linux-2.0/README.md`](linux-2.0/README.md):
+Each driver builds out-of-tree from inside its own directory and installs the
+same way. See that directory's README for the per-kernel specifics — build tree,
+parameters, boot wiring: [`linux-2.0/`](linux-2.0/README.md) and
+[`linux-7.0/`](linux-7.0/README.md).
 
 ```sh
 cd linux-7.0          # or linux-2.0
 ./install.sh          # build, install, depmod (as root)
 ```
-
-The Linux 7.x driver builds as `scsilink.ko` via kbuild against the running
-kernel's build tree (`/lib/modules/$(uname -r)/build`); load it with `modprobe
-scsilink`. The RX poll cadence is tunable at load — e.g. `modprobe scsilink
-poll_ms=80 poll0_ms=20 fast_hold=16`.
 
 Pre-built release tarballs are on the
 [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases)

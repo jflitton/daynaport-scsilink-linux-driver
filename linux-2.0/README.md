@@ -1,16 +1,15 @@
-# daynaport-scsilink-linux-driver
+# DaynaPORT SCSI/Link — Linux 2.0.x driver
 
-A loadable Ethernet driver for the **DaynaPORT SCSI/Link** SCSI-to-Ethernet
-adapter on **Linux 2.0.x**, as emulated by [BlueSCSI V2](https://bluescsi.com/), [ZuluSCSI](https://zuluscsi.com/), and [PiSCSI](https://github.com/PiSCSI/piscsi). It binds to the SCSI processor device the adapter presents and
-exposes it as a standard Ethernet interface (`eth0`). Builds out-of-tree as a
-loadable module (`scsilink.o`) against any 2.0.x kernel source.
+The **Linux 2.0.x** build of the DaynaPORT SCSI/Link Ethernet driver. Builds
+out-of-tree as a loadable module (`scsilink.o`) against any 2.0.x kernel source.
+See the [project README](../README.md) for the overview and the shared protocol
+constants + RX parser in [`lib/`](../lib).
 
-Tested on i386 / Adaptec AHA-1542 / BlueSCSI V2 release v2026.04.27.
+Tested on 486SLC @ 33MHz / Adaptec AHA-1542 / BlueSCSI V2 release v2026.04.27.
 
 ## Install
 
-Download the latest release tarball from the [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases) page
-or clone this repo.
+Download the latest release tarball from the [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases) page or clone this repo.
 
 Needs the target's configured kernel source (default `/usr/src/linux`, matching
 the running kernel) and the period gcc (2.7.x). As root:
