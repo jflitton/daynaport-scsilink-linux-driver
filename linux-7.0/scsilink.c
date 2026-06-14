@@ -199,11 +199,7 @@ static int scsilink_rx_poll(struct scsilink *dp)
 	 * run past the cleared region into stale bytes that parse as a bogus record. */
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
-	memset(cdb, 0, sizeof(cdb));
-	cdb[0] = SCSILINK_CMD_RECV;
-	cdb[3] = (SCSILINK_RX_REQ >> 8) & 0xff;
-	cdb[4] = SCSILINK_RX_REQ & 0xff;
-	cdb[5] = SCSILINK_RECV_FLAG;
+	daynaport_cdb6(cdb, SCSILINK_CMD_RECV, SCSILINK_RX_REQ, SCSILINK_RECV_FLAG);
 
 	scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, dp->rbuf, SCSILINK_RBUF_LEN);
 
@@ -235,11 +231,7 @@ static void scsilink_tx_one(struct scsilink *dp, struct sk_buff *skb)
 		len = SCSILINK_MINFRAME;
 	}
 
-	memset(cdb, 0, sizeof(cdb));
-	cdb[0] = SCSILINK_CMD_SEND;
-	cdb[3] = (len >> 8) & 0xff;
-	cdb[4] = len & 0xff;
-	cdb[5] = SCSILINK_SEND_FLAG;
+	daynaport_cdb6(cdb, SCSILINK_CMD_SEND, len, SCSILINK_SEND_FLAG);
 
 	if (scsilink_scsi(dp, cdb, REQ_OP_DRV_OUT, dp->tbuf, len)) {
 		dev->stats.tx_errors++;
@@ -257,12 +249,14 @@ static int scsilink_poll_thread(void *arg)
 {
 	struct scsilink *dp = arg;
 	struct sk_buff *skb;
+	bool fast = false;
 	int n;
 
 	while (!kthread_should_stop()) {
 		/* Read the cadence knobs live so runtime sysfs writes take effect
-		 * on the next poll without a reload. */
-		int ms = dp->fast_left > 0 ? poll0_ms : poll_ms;
+		 * on the next poll without a reload.  `fast` is the rate the shared
+		 * cadence policy chose after the previous poll. */
+		int ms = fast ? poll0_ms : poll_ms;
 		unsigned long to = max_t(unsigned long, msecs_to_jiffies(ms), 1);
 
 		/* Sleep until a frame is queued, we're asked to stop, or the poll
@@ -281,17 +275,13 @@ static int scsilink_poll_thread(void *arg)
 		if (netif_queue_stopped(dp->dev))
 			netif_wake_queue(dp->dev);
 
-		/* One RX poll.  The cadence keys off UNICAST traffic (frames for
-		 * us); broadcast/multicast is delivered but does not sustain fast-poll:
-		 *  - unicast for us   -> fast rate, and hold fast for fast_hold polls
-		 *  - none, holding    -> stay fast (window-breathing gap)
-		 *  - idle             -> idle rate
-		 */
+		/* One RX poll, then let the shared policy pick the next rate: fast
+		 * while to-us frames are arriving and through a brief hold after
+		 * (a download's queue goes briefly empty as TCP's window breathes),
+		 * idle once that hold is spent.  Broadcast/multicast is delivered but
+		 * does not sustain fast-poll. */
 		n = scsilink_rx_poll(dp);
-		if (n > 0)
-			dp->fast_left = fast_hold;
-		else if (dp->fast_left > 0)
-			dp->fast_left--;
+		fast = daynaport_poll_fast(n, &dp->fast_left, fast_hold);
 	}
 	return 0;
 }
@@ -369,8 +359,8 @@ static const struct net_device_ops scsilink_netdev_ops = {
 static bool is_scsilink(struct scsi_device *sdev)
 {
 	return sdev->type == TYPE_PROCESSOR &&
-	       !memcmp(sdev->vendor, "Dayna", 5) &&
-	       !memcmp(sdev->model,  "SCSI/Link", 9);
+	       !memcmp(sdev->vendor, SCSILINK_VENDOR, sizeof(SCSILINK_VENDOR) - 1) &&
+	       !memcmp(sdev->model,  SCSILINK_MODEL,  sizeof(SCSILINK_MODEL)  - 1);
 }
 
 static int scsilink_probe(struct scsi_device *sdev)
@@ -412,17 +402,13 @@ static int scsilink_probe(struct scsi_device *sdev)
 
 	/* Bring the adapter up: ENABLE (0x0E), wait the required ~0.5s settle,
 	 * then read the MAC + stats (0x09).  Enable once here, not per open. */
-	memset(cdb, 0, sizeof(cdb));
-	cdb[0] = SCSILINK_CMD_ENABLE;
-	cdb[5] = SCSILINK_ENABLE_FLAG;
+	daynaport_cdb6(cdb, SCSILINK_CMD_ENABLE, 0, SCSILINK_ENABLE_FLAG);
 	err = scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, NULL, 0);
 	if (err)
 		dev_warn(gendev, "scsilink: enable failed (0x%x)\n", err);
 	msleep(500);
 
-	memset(cdb, 0, sizeof(cdb));
-	cdb[0] = SCSILINK_CMD_STATS;
-	cdb[4] = SCSILINK_STATS_LEN;
+	daynaport_cdb6(cdb, SCSILINK_CMD_STATS, SCSILINK_STATS_LEN, 0);
 	err = scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, dp->rbuf, SCSILINK_STATS_LEN);
 	if (err) {
 		dev_err(gendev, "scsilink: MAC read failed (0x%x)\n", err);

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * daynaport.h - DaynaPORT SCSI/Link protocol definitions and RX frame parser,
- *               shared verbatim across every kernel-version driver in this repo.
+ * daynaport.h - DaynaPORT SCSI/Link protocol definitions, CDB assembly, RX frame
+ *               parser, and adaptive-poll cadence: the version-independent core
+ *               shared across every kernel-version driver in this repo.
  *
  * This header is deliberately free of any kernel API (no sk_buff, net_device,
  * or stats types) and is C89-clean, so the same code compiles under gcc 2.7.x
@@ -26,6 +27,14 @@
 #define SCSILINK_RECV_FLAG	0xC0	/* cdb[5] for READ: blind mode (per NetBSD dse) */
 #define SCSILINK_SEND_FLAG	0x00	/* cdb[5] for WRITE: raw frame format */
 
+/* SCSI INQUIRY identity of a DaynaPORT SCSI/Link: a TYPE_PROCESSOR device whose
+ * vendor/product strings match these.  Drivers do the type check and the memcmp
+ * themselves (the scsi_device struct differs across kernels); centralizing the
+ * strings lets the match lengths come from the literals instead of magic numbers
+ * (memcmp <string> with sizeof(SCSILINK_VENDOR) - 1, etc.). */
+#define SCSILINK_VENDOR		"Dayna"
+#define SCSILINK_MODEL		"SCSI/Link"
+
 /* RX framing: each record is a 2-byte big-endian length + 4-byte flag field,
  * followed by <length> bytes of frame including a trailing 4-byte Ethernet FCS. */
 #define SCSILINK_RX_HDR		6	/* 2-byte length + 4-byte flag field */
@@ -33,6 +42,24 @@
 #define SCSILINK_MINFRAME	60	/* minimum Ethernet payload (also TX pad) */
 #define SCSILINK_MAXFRAME	1514	/* == ETH_FRAME_LEN, no FCS */
 #define SCSILINK_RX_MAXREC	(SCSILINK_MAXFRAME + SCSILINK_FCS_LEN)
+
+/*
+ * Build a DaynaPORT 6-byte CDB in cdb[0..5]: opcode in cdb[0], a big-endian
+ * transfer length in cdb[3..4], the per-command flag in cdb[5]; cdb[1..2] are
+ * always zero.  All four commands this driver issues share this one shape, so
+ * ENABLE passes len 0 (no data phase) and STATS passes SCSILINK_STATS_LEN.  Pure
+ * byte assembly, no kernel API.
+ */
+static void daynaport_cdb6(unsigned char *cdb, unsigned char op,
+			   int len, unsigned char flag)
+{
+	cdb[0] = op;
+	cdb[1] = 0;
+	cdb[2] = 0;
+	cdb[3] = (len >> 8) & 0xff;
+	cdb[4] = len & 0xff;
+	cdb[5] = flag;
+}
 
 /*
  * Per-frame delivery callback.  daynaport_rx_parse() calls this once for each
@@ -104,6 +131,26 @@ static int daynaport_rx_parse(const unsigned char *buf, int buflen,
 	}
 
 	return n;
+}
+
+/*
+ * Adaptive RX-poll cadence (shared policy; the mechanism -- a 2.0 timer or a 7.x
+ * kthread sleep -- is the caller's).  Call once after each READ with the number
+ * of `unicast` (to-us) frames it delivered; this updates the held-fast counter
+ * and returns whether the NEXT poll should use the fast rate.  Any to-us frame
+ * re-arms a full run of fast_hold fast polls; otherwise each empty poll spends
+ * one held fast poll, and once they are gone we relax to the idle rate.  The
+ * caller passes only the unicast count, so ambient broadcast/multicast chatter
+ * is delivered but does not pin us in fast-poll.  Returns nonzero for fast.
+ */
+static int daynaport_poll_fast(int unicast, int *fast_left, int fast_hold)
+{
+	if (unicast > 0)
+		*fast_left = fast_hold;
+	else if (*fast_left > 0)
+		*fast_left -= 1;
+
+	return *fast_left > 0;
 }
 
 #endif /* DAYNAPORT_H */

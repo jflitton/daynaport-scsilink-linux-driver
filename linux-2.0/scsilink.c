@@ -190,8 +190,8 @@ struct Scsi_Device_Template scsilink_template = {
 static int is_scsilink(Scsi_Device *sd)
 {
 	return sd->type == TYPE_PROCESSOR
-	    && memcmp(sd->vendor, "Dayna", 5) == 0
-	    && memcmp(sd->model,  "SCSI/Link", 9) == 0;
+	    && memcmp(sd->vendor, SCSILINK_VENDOR, sizeof(SCSILINK_VENDOR) - 1) == 0
+	    && memcmp(sd->model,  SCSILINK_MODEL,  sizeof(SCSILINK_MODEL)  - 1) == 0;
 }
 
 static struct scsilink *scsilink_find(Scsi_Device *sd)
@@ -332,12 +332,8 @@ static void scsilink_rx_kick(unsigned long arg)
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
 	SCpnt->cmd_len = 0;
-	cmd[0] = SCSILINK_CMD_RECV;
-	cmd[1] = 0;
-	cmd[2] = 0;
-	cmd[3] = (SCSILINK_RX_REQ >> 8) & 0xff;	/* request up to a 2-frame batch */
-	cmd[4] = SCSILINK_RX_REQ & 0xff;
-	cmd[5] = SCSILINK_RECV_FLAG;
+	/* request up to a 2-frame batch */
+	daynaport_cdb6(cmd, SCSILINK_CMD_RECV, SCSILINK_RX_REQ, SCSILINK_RECV_FLAG);
 
 	scsi_do_cmd(SCpnt, cmd, dp->rbuf, SCSILINK_RBUF_LEN, scsilink_recv_done,
 		    SCSILINK_TIMEOUT, SCSILINK_RETRIES);
@@ -366,21 +362,13 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 		return;
 
 	/*
-	 * Re-arm the poll (cadence keys off UNICAST frames -- those for us;
-	 * broadcast/multicast is delivered but does not sustain fast-poll):
-	 *  - unicast for us            -> fast rate, and hold fast for a while
-	 *  - none but recently active  -> stay fast (window-breathing gap)
-	 *  - idle                      -> idle rate
+	 * Re-arm the poll at the rate the shared cadence policy picks
+	 * (daynaport_poll_fast): fast while to-us frames are arriving and through
+	 * a brief hold afterwards (a download's queue goes briefly empty as TCP's
+	 * window breathes), idle once that hold is spent.
 	 */
-	if (n > 0) {
-		dp->fast_left = fast_hold;
-		next = scsilink_poll0;
-	} else if (dp->fast_left > 0) {
-		dp->fast_left--;
-		next = scsilink_poll0;
-	} else {
-		next = scsilink_poll;
-	}
+	next = daynaport_poll_fast(n, &dp->fast_left, fast_hold)
+	     ? scsilink_poll0 : scsilink_poll;
 	dp->last_to = next;
 	dp->rx_timer.expires = jiffies + next;
 	add_timer(&dp->rx_timer);
@@ -430,12 +418,7 @@ static int scsilink_xmit(struct sk_buff *skb, struct device *dev)
 	}
 
 	SCpnt->cmd_len = 0;
-	cmd[0] = SCSILINK_CMD_SEND;
-	cmd[1] = 0;
-	cmd[2] = 0;
-	cmd[3] = (len >> 8) & 0xff;
-	cmd[4] = len & 0xff;
-	cmd[5] = SCSILINK_SEND_FLAG;
+	daynaport_cdb6(cmd, SCSILINK_CMD_SEND, len, SCSILINK_SEND_FLAG);
 
 	dev->trans_start = jiffies;
 	scsi_do_cmd(SCpnt, cmd, dp->tbuf, len, scsilink_send_done,
@@ -604,9 +587,7 @@ static void scsilink_finish(void)
 		/* ENABLE the interface (0x0E, flag 0x80), then wait ~0.5s.
 		 * No data phase.  XXX NetBSD issues this as a 6-byte DATA-IN;
 		 * BlueSCSI takes it as no-data, which is what we do here. */
-		memset(cmd, 0, sizeof(cmd));
-		cmd[0] = SCSILINK_CMD_ENABLE;
-		cmd[5] = SCSILINK_ENABLE_FLAG;
+		daynaport_cdb6(cmd, SCSILINK_CMD_ENABLE, 0, SCSILINK_ENABLE_FLAG);
 		rc = scsilink_scsi_sync(dp, cmd, NULL, 0);
 		if (rc)
 			printk("scsilink: %s: enable failed (0x%x)\n",
@@ -614,9 +595,7 @@ static void scsilink_finish(void)
 		scsilink_delay(HZ / 2);
 
 		/* Read MAC + stats (0x09, 18 bytes) into the RX buffer. */
-		memset(cmd, 0, sizeof(cmd));
-		cmd[0] = SCSILINK_CMD_STATS;
-		cmd[4] = SCSILINK_STATS_LEN;
+		daynaport_cdb6(cmd, SCSILINK_CMD_STATS, SCSILINK_STATS_LEN, 0);
 		rc = scsilink_scsi_sync(dp, cmd, dp->rbuf, SCSILINK_STATS_LEN);
 		if (rc) {
 			printk("scsilink: %s: MAC read failed (0x%x)\n",

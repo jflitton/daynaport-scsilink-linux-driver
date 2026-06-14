@@ -1,5 +1,8 @@
 DaynaPORT SCSI/Link Linux driver -- change history
 
+0.4  2026-06-13
+      - Refactored shared code into lib/
+
 0.3  2026-06-11
       - RX poll cadence is now tunable via bare module parameters (milliseconds),
         so it can be swept at load time without rebuilding:
