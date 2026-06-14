@@ -1,5 +1,6 @@
 # build products
 *.o
+lib/daynaport_test
 
 # release artifacts (built by make-release.sh; published as GitHub release assets)
 scsilink-*.tar.gz
