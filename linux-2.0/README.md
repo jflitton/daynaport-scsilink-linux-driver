@@ -43,14 +43,19 @@ Download performance is about 70kB/sec on a 486/33, limited by the fact that rec
 aren't interrupt-driven -- we have to poll for them.  Upload performance is 3-4x better
 as we do have the benefit of interrupts when packets are sent.
 
-The RX poll cadence can be tuned at load time (milliseconds) without rebuilding:
+The RX poll cadence and READ request size can be tuned at load time without
+rebuilding:
 
 ```sh
-insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16   # these are the defaults
+insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # these are the defaults
 ```
 
 `poll_ms` is the idle interval, `poll0_ms` the interval while data is flowing, and
-`fast_hold` how many empty polls to stay at the fast rate before relaxing to idle.
+`fast_hold` how many empty polls to stay at the fast rate before relaxing to idle
+(all in milliseconds). `rx_req_len` is the byte count requested per READ — the
+device may cap or ignore it, and it is clamped to 2048–16384; the default 4096
+already covers BlueSCSI's max 2-frame batch, so raising it changes nothing on
+BlueSCSI or ZuluSCSI.
 
 ## Files
 

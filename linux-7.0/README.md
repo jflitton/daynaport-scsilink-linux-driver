@@ -50,20 +50,22 @@ ip link set eth0 up
 
 ## Parameters (RX poll cadence)
 
-There is no RX interrupt, so receive is polled. Three knobs control the cadence,
-and — unlike the 2.0 driver — they are **writable at runtime** (the poll loop
-reads them live each cycle), as well as settable at load:
+There is no RX interrupt, so receive is polled. Three knobs control the cadence
+and a fourth (`rx_req_len`) sizes each READ request; unlike the 2.0 driver they
+are all **writable at runtime** as well as settable at load (the poll loop reads
+them live each cycle):
 
 ```sh
-modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16   # at load (defaults shown)
+modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # at load (defaults shown)
 echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect next poll
 ```
 
-| Param       | Meaning                                                          |
-|-------------|------------------------------------------------------------------|
-| `poll_ms`   | idle interval — between READs when no data is waiting (ms)        |
-| `poll0_ms`  | fast interval — while data is flowing, and during the hold (ms)   |
-| `fast_hold` | empty polls to stay at the fast rate before relaxing to idle      |
+| Param        | Meaning                                                          |
+|--------------|------------------------------------------------------------------|
+| `poll_ms`    | idle interval — between READs when no data is waiting (ms)        |
+| `poll0_ms`   | fast interval — while data is flowing, and during the hold (ms)   |
+| `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
+| `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 
 Measured on the test rig: ~5.6 Mbit/s TX, ~4.8 Mbit/s RX over the polled READ
 path. The defaults are already near-optimal — a `poll0_ms` sweep showed RX is
@@ -71,6 +73,11 @@ flat from ~5–20 ms and actually *degrades* below that (polling harder just flo
 the adapter with empty READs), because the receive ceiling is set by the per-READ
 round-trip and the adapter, not the host poll rate. The knobs are most useful for
 characterization and on much slower hosts.
+
+`rx_req_len` is headroom for targets that honor a larger request: BlueSCSI
+hard-caps a batch at 2 frames and ZuluSCSI ignores the field entirely, so raising
+it changes nothing on those two — the default 4096 already covers BlueSCSI's
+max batch.
 
 ## Files
 

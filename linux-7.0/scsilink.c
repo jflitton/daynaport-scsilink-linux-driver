@@ -62,11 +62,17 @@
  *  reference/daynaport.md).  The driver-policy tunables below stay here.
  * ----------------------------------------------------------------------- */
 
-/* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
- * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
- * (network.c, DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its
- * bus-hold guard.  4096 leaves room for that 2-frame batch. */
-#define SCSILINK_RX_REQ		4096
+/* Default and floor for rx_req_len (below): the allocation length we put in the
+ * READ CDB.  It is only a hint -- the device may return less, more, or ignore
+ * it.  BlueSCSI (blind mode, cdb[5]=0xC0) packs frames into one response until
+ * "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size" (network.c,
+ * DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its bus-hold guard;
+ * 4096 leaves room for that 2-frame batch.  ZuluSCSI ignores the field outright.
+ * The floor matters: below ~1530 BlueSCSI cannot pack even one max-size frame,
+ * so RX would silently stall -- hence SCSILINK_RX_REQ_MIN.  The ceiling is
+ * SCSILINK_RBUF_LEN (requesting more than the buffer is incoherent). */
+#define SCSILINK_RX_REQ		4096	/* default rx_req_len, bytes */
+#define SCSILINK_RX_REQ_MIN	2048	/* floor: >= one full frame + pack overhead */
 
 /* RX SCSI transfer buffer.  Sized generously to hold a large multi-frame
  * response.  We never assume how much the device returns: BlueSCSI bounds a
@@ -112,6 +118,37 @@ module_param(fast_hold, int, 0644);
 MODULE_PARM_DESC(poll_ms,   "RX idle poll interval, milliseconds (default 80)");
 MODULE_PARM_DESC(poll0_ms,  "RX fast poll interval, milliseconds (default 20)");
 MODULE_PARM_DESC(fast_hold, "empty polls to stay fast before relaxing (default 16)");
+
+/* READ-request length (bytes) placed in the CDB; the device may cap or ignore
+ * it.  Writable at load and at runtime; the set handler validates and clamps
+ * every write to [SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN], so the poll path can
+ * use it unguarded. */
+static int rx_req_len = SCSILINK_RX_REQ;
+
+static int scsilink_set_rx_req_len(const char *val, const struct kernel_param *kp)
+{
+	int n, c, ret;
+
+	ret = kstrtoint(val, 0, &n);
+	if (ret)
+		return ret;
+
+	c = clamp(n, SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN);
+	if (c != n)
+		pr_warn("scsilink: rx_req_len %d out of [%d, %d]; using %d\n",
+			n, SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN, c);
+	rx_req_len = c;
+	return 0;
+}
+
+static const struct kernel_param_ops scsilink_rx_req_len_ops = {
+	.set = scsilink_set_rx_req_len,
+	.get = param_get_int,
+};
+module_param_cb(rx_req_len, &scsilink_rx_req_len_ops, &rx_req_len, 0644);
+MODULE_PARM_DESC(rx_req_len,
+	"READ request length in bytes; device may cap or ignore it "
+	"(default 4096, clamped to [2048, 16384])");
 
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in netdev_priv(dev) (allocated by alloc_etherdev).
@@ -195,11 +232,11 @@ static int scsilink_rx_poll(struct scsilink *dp)
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how daynaport_rx_parse() knows
 	 * to stop.  Zero the ENTIRE buffer, not just the requested length: a batch
-	 * exceeding SCSILINK_RX_REQ (ZuluSCSI ignores the request) would otherwise
-	 * run past the cleared region into stale bytes that parse as a bogus record. */
+	 * exceeding rx_req_len (ZuluSCSI ignores the request) would otherwise run
+	 * past the cleared region into stale bytes that parse as a bogus record. */
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
-	daynaport_cdb6(cdb, SCSILINK_CMD_RECV, SCSILINK_RX_REQ, SCSILINK_RECV_FLAG);
+	daynaport_cdb6(cdb, SCSILINK_CMD_RECV, rx_req_len, SCSILINK_RECV_FLAG);
 
 	scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, dp->rbuf, SCSILINK_RBUF_LEN);
 

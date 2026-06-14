@@ -73,13 +73,18 @@
  * shared, version-independent "daynaport.h" (included above; see
  * reference/daynaport.md).  The driver-policy tunables below stay here. */
 
-/* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
- * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
- * (network.c, DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its
- * bus-hold guard.  Requesting one record (1524) forces a single frame; 4096
- * leaves room for two.
+/* Default and floor for rx_req_len (below): the allocation length we put in the
+ * READ CDB.  It is only a hint -- the device may return less, more, or ignore
+ * it.  BlueSCSI (blind mode, cdb[5]=0xC0) packs frames into one response until
+ * "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size" (network.c,
+ * DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its bus-hold guard;
+ * 4096 leaves room for that 2-frame batch.  ZuluSCSI ignores the field outright.
+ * The floor matters: below ~1530 BlueSCSI cannot pack even one max-size frame,
+ * so RX would silently stall -- hence SCSILINK_RX_REQ_MIN.  The ceiling is
+ * SCSILINK_RBUF_LEN (requesting more than the buffer is incoherent).
  */
-#define SCSILINK_RX_REQ		4096	/* room for BlueSCSI's 2-frame batch */
+#define SCSILINK_RX_REQ		4096	/* default rx_req_len, bytes */
+#define SCSILINK_RX_REQ_MIN	2048	/* floor: >= one full frame + pack overhead */
 
 /* RX SCSI transfer (DMA) buffer, and the length handed to scsi_do_cmd.  Sized
  * generously (NetBSD uses the same 16K) to hold a large multi-frame response.
@@ -112,7 +117,7 @@
  * The three knobs are bare module parameters (Linux 2.0 has no MODULE_PARM), so
  * the cadence can be swept at load time without rebuilding:
  *
- *   insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16
+ *   insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096
  *
  * poll_ms   idle rate: interval between READs when no data is waiting.
  * poll0_ms  fast rate: interval while data is flowing (and during the hold).
@@ -127,6 +132,12 @@ static int fast_hold = 16;
 
 static int scsilink_poll  = ((HZ / 12) ? (HZ / 12) : 1);	/* idle, ticks */
 static int scsilink_poll0 = ((HZ / 50) ? (HZ / 50) : 1);	/* fast, ticks */
+
+/* READ-request length (bytes) placed in the CDB; the device may cap or ignore
+ * it.  A bare module parameter like the cadence knobs above; init_module
+ * validates and clamps it to [SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN] so the
+ * poll path can use it unguarded. */
+static int rx_req_len = SCSILINK_RX_REQ;
 
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in dev->priv (allocated by init_etherdev).
@@ -332,8 +343,8 @@ static void scsilink_rx_kick(unsigned long arg)
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
 	SCpnt->cmd_len = 0;
-	/* request up to a 2-frame batch */
-	daynaport_cdb6(cmd, SCSILINK_CMD_RECV, SCSILINK_RX_REQ, SCSILINK_RECV_FLAG);
+	/* request the configured batch length (rx_req_len); the device may cap it */
+	daynaport_cdb6(cmd, SCSILINK_CMD_RECV, rx_req_len, SCSILINK_RECV_FLAG);
 
 	scsi_do_cmd(SCpnt, cmd, dp->rbuf, SCSILINK_RBUF_LEN, scsilink_recv_done,
 		    SCSILINK_TIMEOUT, SCSILINK_RETRIES);
@@ -654,6 +665,16 @@ int init_module(void)
 	if (scsilink_poll  < 1) scsilink_poll  = 1;
 	scsilink_poll0 = (poll0_ms * HZ) / 1000;
 	if (scsilink_poll0 < 1) scsilink_poll0 = 1;
+
+	/* Clamp the requested READ length into [MIN, buffer]: too small and BlueSCSI
+	 * packs zero frames (RX stalls); larger than the buffer is incoherent. */
+	if (rx_req_len < SCSILINK_RX_REQ_MIN || rx_req_len > SCSILINK_RBUF_LEN) {
+		int c = rx_req_len < SCSILINK_RX_REQ_MIN
+		      ? SCSILINK_RX_REQ_MIN : SCSILINK_RBUF_LEN;
+		printk("scsilink: rx_req_len %d out of [%d, %d]; using %d\n",
+		       rx_req_len, SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN, c);
+		rx_req_len = c;
+	}
 
 	scsilink_template.usage_count = &mod_use_count_;
 	return scsi_register_module(MODULE_SCSI_DEV, &scsilink_template);
