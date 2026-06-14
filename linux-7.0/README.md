@@ -48,15 +48,15 @@ ip link set eth0 up
 > either disable Secure Boot, or enroll your own MOK key and sign with it. With
 > Secure Boot off, the unsigned module loads normally.
 
-## Parameters (RX poll cadence)
+## Parameters
 
-There is no RX interrupt, so receive is polled. Three knobs control the cadence
-and a fourth (`rx_req_len`) sizes each READ request; unlike the 2.0 driver they
-are all **writable at runtime** as well as settable at load (the poll loop reads
-them live each cycle):
+There is no RX interrupt, so receive is polled. Three knobs control the RX
+cadence, `rx_req_len` sizes each READ request, and `tx_burst` balances TX against
+RX on the device's single command slot. They are all **writable at runtime** as
+well as settable at load (the poll loop reads them live each cycle):
 
 ```sh
-modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # at load (defaults shown)
+modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=16   # at load (defaults shown)
 echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect next poll
 ```
 
@@ -66,6 +66,7 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | `poll0_ms`   | fast interval — while data is flowing, and during the hold (ms)   |
 | `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
+| `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 
 Measured on the test rig: ~5.6 Mbit/s TX, ~4.8 Mbit/s RX over the polled READ
 path. The defaults are already near-optimal — a `poll0_ms` sweep showed RX is
@@ -78,6 +79,16 @@ characterization and on much slower hosts.
 hard-caps a batch at 2 frames and ZuluSCSI ignores the field entirely, so raising
 it changes nothing on those two — the default 4096 already covers BlueSCSI's
 max batch.
+
+`tx_burst` arbitrates the device's one-command-at-a-time channel: the poll loop
+sends at most this many frames before forcing an RX poll. Since the device cannot
+transmit and receive at once, a large burst favors upload throughput (back-to-back
+WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
+(inbound ACKs and replies drain sooner instead of overflowing the adapter's small
+RX FIFO while the host holds the bus writing). The default 16 sends the whole
+queue each cycle, which measured best on the test rig — there the inbound loss
+under a sustained upload is bounded by the adapter's FIFO, not by scheduling, so
+shrinking the burst only cost throughput. Lower it if your setup benefits.
 
 ## Files
 

@@ -15,18 +15,18 @@
  *   0x09           - retrieve MAC address + stats (18 bytes)
  *   0x0E           - enable/disable the interface
  *
- * The protocol opcodes/framing and the RX record parser are shared verbatim with
- * every other kernel-version driver in this repo via lib/daynaport.h; this file
- * supplies only the 7.x-specific glue.  Protocol reference: reference/daynaport.md.
+ * The protocol opcodes/framing and the RX record parser live in the shared
+ * lib/daynaport.h; this file supplies only the 7.x-specific glue.  Protocol
+ * reference: reference/daynaport.md.
  *
- * Architecture (vs. the Linux 2.0 original):
+ * Architecture:
  *   - Binds as a struct scsi_driver; the SCSI bus probes every connected device
  *     against us and probe() claims the TYPE_PROCESSOR Dayna/SCSI/Link match.
- *   - All SCSI I/O is one synchronous scsi_execute_cmd() call (no IRQ done
- *     callbacks, no hand-rolled semaphore sync).
+ *   - All SCSI I/O is one synchronous scsi_execute_cmd() call.
  *   - There is no RX interrupt, so RX is polled.  A single per-interface kthread
- *     serializes the device's one-command-at-a-time nature: it drains the TX
- *     queue then issues one READ(6), with no locks beyond the sk_buff_head's own.
+ *     serializes the device's one-command-at-a-time nature: it sends up to
+ *     tx_burst queued frames then issues one READ(6), with no locks beyond the
+ *     sk_buff_head's own.
  */
 
 #include <linux/module.h>
@@ -95,6 +95,10 @@
 /* TX queue depth before we push back on the stack with netif_stop_queue(). */
 #define SCSILINK_TXQ_MAX	16
 
+/* Default TX burst: frames to WRITE before yielding the single command slot to
+ * one RX poll (see the tx_burst param below for the full rationale). */
+#define SCSILINK_TX_BURST	16
+
 /* RX poll cadence.  Policy: while data is flowing, poll at the fast rate; once
  * the device goes empty, hold the fast rate for fast_hold more polls (a
  * download's queue goes briefly empty as TCP's window breathes -- without the
@@ -149,6 +153,41 @@ module_param_cb(rx_req_len, &scsilink_rx_req_len_ops, &rx_req_len, 0644);
 MODULE_PARM_DESC(rx_req_len,
 	"READ request length in bytes; device may cap or ignore it "
 	"(default 4096, clamped to [2048, 16384])");
+
+/* TX fairness knob: the maximum number of frames to WRITE before the poll loop
+ * yields the device's single command slot to one RX poll.  Larger favors upload
+ * throughput (back-to-back WRITEs amortize per-command SCSI overhead); smaller
+ * favors RX fairness (inbound ACKs/replies drain sooner, so the adapter's RX
+ * FIFO overflows less under a sustained upload).  Writable at load and at
+ * runtime; the set handler clamps every write to [1, SCSILINK_TXQ_MAX] so the
+ * poll loop can read it unguarded -- 0 would stall TX outright, and a burst
+ * larger than the queue can hold just drains it whole. */
+static int tx_burst = SCSILINK_TX_BURST;
+
+static int scsilink_set_tx_burst(const char *val, const struct kernel_param *kp)
+{
+	int n, c, ret;
+
+	ret = kstrtoint(val, 0, &n);
+	if (ret)
+		return ret;
+
+	c = clamp(n, 1, SCSILINK_TXQ_MAX);
+	if (c != n)
+		pr_warn("scsilink: tx_burst %d out of [1, %d]; using %d\n",
+			n, SCSILINK_TXQ_MAX, c);
+	tx_burst = c;
+	return 0;
+}
+
+static const struct kernel_param_ops scsilink_tx_burst_ops = {
+	.set = scsilink_set_tx_burst,
+	.get = param_get_int,
+};
+module_param_cb(tx_burst, &scsilink_tx_burst_ops, &tx_burst, 0644);
+MODULE_PARM_DESC(tx_burst,
+	"max frames to send before yielding to one RX poll "
+	"(default 16, clamped to [1, 16])");
 
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in netdev_priv(dev) (allocated by alloc_etherdev).
@@ -295,6 +334,7 @@ static int scsilink_poll_thread(void *arg)
 		 * cadence policy chose after the previous poll. */
 		int ms = fast ? poll0_ms : poll_ms;
 		unsigned long to = max_t(unsigned long, msecs_to_jiffies(ms), 1);
+		int sent = 0;
 
 		/* Sleep until a frame is queued, we're asked to stop, or the poll
 		 * interval elapses -- whichever comes first. */
@@ -304,10 +344,17 @@ static int scsilink_poll_thread(void *arg)
 		if (kthread_should_stop())
 			break;
 
-		/* Drain TX (e.g. TCP ACKs) first so RX does not stall behind them. */
-		while ((skb = skb_dequeue(&dp->txq)) != NULL) {
+		/* Send at most tx_burst frames before yielding the device's single
+		 * command slot to the RX poll below.  The device does one command at
+		 * a time: while we hold the bus writing, inbound frames (ACKs, ping
+		 * replies) pile up in the adapter's small RX FIFO and can overflow.
+		 * The wait above returns immediately while the queue is non-empty, so
+		 * capping the burst makes the loop a weighted tx_burst:1 round-robin
+		 * that guarantees RX a turn every tx_burst frames. */
+		while (sent < tx_burst && (skb = skb_dequeue(&dp->txq)) != NULL) {
 			scsilink_tx_one(dp, skb);
 			dev_consume_skb_any(skb);
+			sent++;
 		}
 		if (netif_queue_stopped(dp->dev))
 			netif_wake_queue(dp->dev);
