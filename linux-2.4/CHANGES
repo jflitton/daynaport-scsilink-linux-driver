@@ -1,5 +1,0 @@
-DaynaPORT SCSI/Link Linux driver -- change history
-
-0.1  2026-06-14
-     Initial release.
-     - Builds as a loadable module against any configured Linux 2.4.x kernel.
