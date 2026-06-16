@@ -4,8 +4,8 @@
  * Copyright (C) 2026 Jeff Flitton <jeff@flitton.dev>
  *
  * A SCSI upper-level device driver that binds to a DaynaPORT
- * SCSI/Link Ethernet adapter (as emulated by BlueSCSI V2 / PiSCSI) and
- * presents it to Linux as a standard Ethernet interface
+ * SCSI/Link Ethernet adapter (as emulated by ZuluSCSI / BlueSCSI V2 / PiSCSI)
+ * and presents it to Linux as a standard Ethernet interface
  *
  * The device is a SCSI Processor device (type 0x03, vendor "Dayna",
  * product "SCSI/Link") that moves Ethernet frames with vendor SCSI opcodes:
@@ -61,49 +61,43 @@
 #include "scsi.h"			/* pulls in <scsi/scsi.h> and hosts.h */
 #include "hosts.h"
 
+#include "daynaport.h"			/* shared DaynaPORT protocol defs + RX parser */
+
 /* ----------------------------------------------------------------------- *
  *  Tunables / constants
  * ----------------------------------------------------------------------- */
 
 #define SCSILINK_MAX		4	/* max DaynaPORT interfaces we manage */
 
-/* DaynaPORT SCSI opcodes (see reference/daynaport.md) */
-#define SCSILINK_CMD_RECV		0x08	/* READ(6)  - receive */
-#define SCSILINK_CMD_STATS		0x09	/* retrieve MAC + stats (18 bytes) */
-#define SCSILINK_CMD_SEND		0x0A	/* WRITE(6) - transmit */
-#define SCSILINK_CMD_ENABLE	0x0E	/* enable/disable interface */
+/* DaynaPORT SCSI opcodes, command flags, and RX framing constants live in the
+ * shared, version-independent "daynaport.h" (included above; see
+ * reference/daynaport.md).  The driver-policy tunables below stay here. */
 
-#define SCSILINK_STATS_LEN		0x12	/* 18 bytes: 6 MAC + 3x4 counters */
-#define SCSILINK_ENABLE_FLAG	0x80	/* cdb[5] for enable */
-#define SCSILINK_RECV_FLAG		0xC0	/* cdb[5] for READ: blind mode (per NetBSD dse) */
-#define SCSILINK_SEND_FLAG		0x00	/* cdb[5] for WRITE: raw frame format */
-
-/* RX framing: 2-byte big-endian length + 4-byte flag field per packet */
-#define SCSILINK_RX_HDR		6
-#define SCSILINK_FCS_LEN		4	/* trailing Ethernet FCS, stripped */
-#define SCSILINK_MINFRAME		60	/* pad short TX frames to this */
-#define SCSILINK_MAXFRAME		ETH_FRAME_LEN	/* 1514, no FCS */
-#define SCSILINK_RX_MAXREC		(SCSILINK_MAXFRAME + SCSILINK_FCS_LEN)
-
-/* Length we request in each READ CDB.  BlueSCSI (blind mode, cdb[5]=0xC0) packs
- * frames into one response until "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size"
- * (network.c, DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its
- * bus-hold guard.  Requesting one record (1524) forces a single frame; 4096
- * leaves room for two.
+/* Default and floor for rx_req_len (below): the allocation length we put in the
+ * READ CDB.  It is only a hint -- the device may return less or cap it.  BlueSCSI
+ * and ZuluSCSI are both based on SCSI2SD: in blind mode (cdb[5]=0xC0) the
+ * firmware packs frames into one response until
+ * "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size" (network.c,
+ * DAYNAPORT_SCSI_PACKET_MAX = 1524), then hard-stops at 2 frames on a bus-hold
+ * guard; 4096 leaves room for
+ * that 2-frame batch.  The floor matters: below ~1530 the firmware cannot pack
+ * even one max-size frame, so RX would silently stall -- hence
+ * SCSILINK_RX_REQ_MIN.  The ceiling is SCSILINK_RBUF_LEN (requesting more than
+ * the buffer is incoherent).
  */
-#define SCSILINK_RX_REQ		4096	/* room for BlueSCSI's 2-frame batch */
+#define SCSILINK_RX_REQ		4096	/* default rx_req_len, bytes */
+#define SCSILINK_RX_REQ_MIN	2048	/* floor: >= one full frame + pack overhead */
 
 /* RX SCSI transfer (DMA) buffer, and the length handed to scsi_do_cmd.  Sized
  * generously (NetBSD uses the same 16K) to hold a large multi-frame response.
- * We never assume how much the device returns: BlueSCSI bounds a batch to the
- * requested length, but ZuluSCSI ignores the request and caps only on a byte
- * budget, so it can return more than we ask for.
- * scsilink_rx_kick() zeroes this WHOLE buffer
+ * We never assume how much the device returns: a batch is a variable-length run
+ * of frames (up to the firmware's 2-frame cap) and we do not trust the device's
+ * length/flag fields to bound it.  scsilink_rx_kick() zeroes this WHOLE buffer
  * before each READ so a zero-length terminator always lands after the data
  * (however much arrives), and scsilink_rx() walks records bounded by this
  * length; a response larger than the buffer is simply received across
  * successive READs.  Do NOT shrink the pre-zero to the requested length -- a
- * batch exceeding it would run past the cleared region into stale bytes that
+ * larger batch would run past the cleared region into stale bytes that
  * parse as a bogus record.  MUST be GFP_DMA for 24-bit ISA DMA). */
 #define SCSILINK_RBUF_LEN		16384
 #define SCSILINK_TBUF_LEN		1536	/* one frame + slack */
@@ -124,7 +118,7 @@
  * The three knobs are bare module parameters (Linux 2.0 has no MODULE_PARM), so
  * the cadence can be swept at load time without rebuilding:
  *
- *   insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16
+ *   insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096
  *
  * poll_ms   idle rate: interval between READs when no data is waiting.
  * poll0_ms  fast rate: interval while data is flowing (and during the hold).
@@ -140,6 +134,12 @@ static int fast_hold = 16;
 static int scsilink_poll  = ((HZ / 12) ? (HZ / 12) : 1);	/* idle, ticks */
 static int scsilink_poll0 = ((HZ / 50) ? (HZ / 50) : 1);	/* fast, ticks */
 
+/* READ-request length (bytes) placed in the CDB; the device may cap or ignore
+ * it.  A bare module parameter like the cadence knobs above; init_module
+ * validates and clamps it to [SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN] so the
+ * poll path can use it unguarded. */
+static int rx_req_len = SCSILINK_RX_REQ;
+
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in dev->priv (allocated by init_etherdev).
  * ----------------------------------------------------------------------- */
@@ -153,7 +153,6 @@ struct scsilink {
 	unsigned char		*tbuf;		/* GFP_DMA TX buffer */
 	int			running;	/* interface up + polling */
 	int			inited;		/* finish() hardware init done */
-	int			last_to;	/* last poll interval (ticks) */
 	int			fast_left;	/* fast polls remaining after activity */
 };
 
@@ -172,7 +171,6 @@ static int  scsilink_open(struct device *);
 static int  scsilink_stop(struct device *);
 static int  scsilink_xmit(struct sk_buff *, struct device *);
 static struct enet_statistics *scsilink_get_stats(struct device *);
-static void scsilink_set_multicast(struct device *);
 
 static void scsilink_rx_kick(unsigned long);
 static void scsilink_recv_done(Scsi_Cmnd *);
@@ -202,8 +200,8 @@ struct Scsi_Device_Template scsilink_template = {
 static int is_scsilink(Scsi_Device *sd)
 {
 	return sd->type == TYPE_PROCESSOR
-	    && memcmp(sd->vendor, "Dayna", 5) == 0
-	    && memcmp(sd->model,  "SCSI/Link", 9) == 0;
+	    && memcmp(sd->vendor, SCSILINK_VENDOR, sizeof(SCSILINK_VENDOR) - 1) == 0
+	    && memcmp(sd->model,  SCSILINK_MODEL,  sizeof(SCSILINK_MODEL)  - 1) == 0;
 }
 
 static struct scsilink *scsilink_find(Scsi_Device *sd)
@@ -263,9 +261,15 @@ static int scsilink_scsi_sync(struct scsilink *dp, unsigned char *cdb,
  *  Receive
  * ----------------------------------------------------------------------- */
 
-/* Hand one frame (FCS already stripped) up to the stack. */
-static void scsilink_rx_one(struct scsilink *dp, unsigned char *frame, int len)
+/*
+ * Deliver one frame (FCS already stripped) up to the stack.  This is the
+ * version-specific half of the RX path: the record-walking lives in the shared
+ * daynaport_rx_parse() (daynaport.h), which invokes this callback once per good
+ * frame.  ctx is our per-interface state.
+ */
+static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
 {
+	struct scsilink *dp = (struct scsilink *) ctx;
 	struct sk_buff *skb;
 
 	skb = dev_alloc_skb(len + 2);
@@ -282,59 +286,22 @@ static void scsilink_rx_one(struct scsilink *dp, unsigned char *frame, int len)
 }
 
 /*
- * Parse a READ response.  Each record is:
- *   [2-byte BE length][4-byte flag field][length bytes of frame incl 4-byte FCS]
- *
- * Per the Dayna command set, the flag field's low byte is 0x10 ("more packets
- * available in device memory") or 0x00 ("last packet"), and a zero-length
- * header terminates the response.
- *
- * In practice the flag scopes to the response, not the device's whole queue.
- * BlueSCSI and ZuluSCSI share the same SCSI2SD-derived network.c and both emit
- * data[5] = (done ? 0 : 0x10): 0x10 = "another record follows in THIS response,"
- * 0x00 = "last record of it."  Since "done" is also set by a per-READ byte cap
- * (~2 max frames), a response can end -- last record 0x00 -- while the device's
- * ring still holds frames (self-consistent if you read it as a device draining a
- * small per-transaction buffer).  So neither value is a cross-READ signal: 0x10
- * means only "another record follows in this same response," and 0x00 only
- * "this response is over" -- NOT "the device's ring is empty."  The flag
- * reliably delimits records within one response, but says nothing about whether
- * another READ is worthwhile.
- *
- * We therefore ignore the flag and terminate on the zero-length header: the
- * caller pre-zeroes the buffer, so the bytes just past the device's data read
- * back as a length-0 header and stop us cleanly.  (We cannot instead bound the
- * buffer by the AHA-1542's residual; it reports the device's early end of the
- * DATA-IN phase as a short transfer.)  Returns packet count.
+ * Parse a READ response out of the (pre-zeroed) RX buffer, delivering each frame
+ * via scsilink_deliver().  The walk itself -- record framing, the zero-length
+ * terminator, why the device's "more" flag is ignored -- lives in the shared
+ * daynaport_rx_parse() (daynaport.h).  Returns the unicast (to-us) frame count
+ * -- the fast/idle cadence keys off that, so broadcast/multicast chatter is
+ * delivered but does not pin us in fast-poll.
  */
 static int scsilink_rx(struct scsilink *dp)
 {
-	unsigned char *p = dp->rbuf;
-	int avail = SCSILINK_RBUF_LEN;
-	int n = 0, len;
+	int errors = 0;
+	int ucast = 0;
 
-	while (avail >= SCSILINK_RX_HDR) {
-		len  = (p[0] << 8) | p[1];	/* big-endian, incl FCS */
-		p     += SCSILINK_RX_HDR;
-		avail -= SCSILINK_RX_HDR;
-
-		if (len == 0)			/* zeroed tail / no (more) data */
-			break;
-
-		if (len < SCSILINK_MINFRAME + SCSILINK_FCS_LEN || len > SCSILINK_RX_MAXREC) {
-			dp->stats.rx_errors++;	/* garbled record; bail out */
-			break;
-		}
-		if (len > avail)		/* would run off the buffer */
-			break;
-
-		scsilink_rx_one(dp, p, len - SCSILINK_FCS_LEN);
-		n++;
-
-		p     += len;
-		avail -= len;
-	}
-	return n;
+	daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+			   scsilink_deliver, dp, &errors, &ucast);
+	dp->stats.rx_errors += errors;
+	return ucast;
 }
 
 /* RX poll timer: issue a READ(6).  Bottom-half context - must not sleep. */
@@ -366,21 +333,17 @@ static void scsilink_rx_kick(unsigned long arg)
 
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how scsilink_rx() knows to stop
-	 * (we do not trust the device's flag field for that; see scsilink_rx).  The
-	 * device can return more than SCSILINK_RX_REQ: ZuluSCSI (verified from its
-	 * source) ignores the requested length, so we don't assume the response fits
-	 * in it.  Zero the entire buffer to guarantee a terminator lands after
-	 * whatever it sends -- zeroing only the requested length lets a larger batch
-	 * run past the cleared region into stale bytes that parse as a bogus record. */
+	 * (we do not trust the device's flag field for that; see scsilink_rx).  We do
+	 * not assume the response fits in the requested length: the buffer is sized
+	 * for a worst-case batch and we let the cleared terminator mark the end.
+	 * Zero the entire buffer to guarantee a terminator lands after whatever it
+	 * sends -- zeroing only the requested length lets a larger batch run past the
+	 * cleared region into stale bytes that parse as a bogus record. */
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
 	SCpnt->cmd_len = 0;
-	cmd[0] = SCSILINK_CMD_RECV;
-	cmd[1] = 0;
-	cmd[2] = 0;
-	cmd[3] = (SCSILINK_RX_REQ >> 8) & 0xff;	/* request up to a 2-frame batch */
-	cmd[4] = SCSILINK_RX_REQ & 0xff;
-	cmd[5] = SCSILINK_RECV_FLAG;
+	/* request the configured batch length (rx_req_len); the device may cap it */
+	daynaport_cdb6(cmd, SCSILINK_CMD_RECV, rx_req_len, SCSILINK_RECV_FLAG);
 
 	scsi_do_cmd(SCpnt, cmd, dp->rbuf, SCSILINK_RBUF_LEN, scsilink_recv_done,
 		    SCSILINK_TIMEOUT, SCSILINK_RETRIES);
@@ -409,21 +372,13 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 		return;
 
 	/*
-	 * Re-arm the poll:
-	 *  - got data this time        -> fast rate, and hold fast for a while
-	 *  - empty but recently active -> stay fast (window-breathing gap)
-	 *  - idle                      -> idle rate
+	 * Re-arm the poll at the rate the shared cadence policy picks
+	 * (daynaport_poll_fast): fast while to-us frames are arriving and through
+	 * a brief hold afterwards (a download's queue goes briefly empty as TCP's
+	 * window breathes), idle once that hold is spent.
 	 */
-	if (n > 0) {
-		dp->fast_left = fast_hold;
-		next = scsilink_poll0;
-	} else if (dp->fast_left > 0) {
-		dp->fast_left--;
-		next = scsilink_poll0;
-	} else {
-		next = scsilink_poll;
-	}
-	dp->last_to = next;
+	next = daynaport_poll_fast(n, &dp->fast_left, fast_hold)
+	     ? scsilink_poll0 : scsilink_poll;
 	dp->rx_timer.expires = jiffies + next;
 	add_timer(&dp->rx_timer);
 }
@@ -472,12 +427,7 @@ static int scsilink_xmit(struct sk_buff *skb, struct device *dev)
 	}
 
 	SCpnt->cmd_len = 0;
-	cmd[0] = SCSILINK_CMD_SEND;
-	cmd[1] = 0;
-	cmd[2] = 0;
-	cmd[3] = (len >> 8) & 0xff;
-	cmd[4] = len & 0xff;
-	cmd[5] = SCSILINK_SEND_FLAG;
+	daynaport_cdb6(cmd, SCSILINK_CMD_SEND, len, SCSILINK_SEND_FLAG);
 
 	dev->trans_start = jiffies;
 	scsi_do_cmd(SCpnt, cmd, dp->tbuf, len, scsilink_send_done,
@@ -518,7 +468,6 @@ static int scsilink_open(struct device *dev)
 	dev->interrupt  = 0;
 	dev->start      = 1;
 
-	dp->last_to = scsilink_poll;
 	dp->rx_timer.expires = jiffies + scsilink_poll;
 	add_timer(&dp->rx_timer);
 
@@ -546,13 +495,6 @@ static struct enet_statistics *scsilink_get_stats(struct device *dev)
 {
 	struct scsilink *dp = (struct scsilink *) dev->priv;
 	return &dp->stats;
-}
-
-/* v1: no multicast filtering.  BlueSCSI ignores 0x0D and 2.0f receives all
- * broadcast anyway; and this hook may run where we cannot sleep to issue a
- * SCSI command.  See reference/linux-2.0.md s7.5. */
-static void scsilink_set_multicast(struct device *dev)
-{
 }
 
 /* ----------------------------------------------------------------------- *
@@ -615,7 +557,6 @@ static int scsilink_attach(Scsi_Device *sd)
 	dev->stop		= scsilink_stop;
 	dev->hard_start_xmit	= scsilink_xmit;
 	dev->get_stats		= scsilink_get_stats;
-	dev->set_multicast_list	= scsilink_set_multicast;
 
 	dp->rx_timer.data     = (unsigned long) dp;
 	dp->rx_timer.function = scsilink_rx_kick;
@@ -646,9 +587,7 @@ static void scsilink_finish(void)
 		/* ENABLE the interface (0x0E, flag 0x80), then wait ~0.5s.
 		 * No data phase.  XXX NetBSD issues this as a 6-byte DATA-IN;
 		 * BlueSCSI takes it as no-data, which is what we do here. */
-		memset(cmd, 0, sizeof(cmd));
-		cmd[0] = SCSILINK_CMD_ENABLE;
-		cmd[5] = SCSILINK_ENABLE_FLAG;
+		daynaport_cdb6(cmd, SCSILINK_CMD_ENABLE, 0, SCSILINK_ENABLE_FLAG);
 		rc = scsilink_scsi_sync(dp, cmd, NULL, 0);
 		if (rc)
 			printk("scsilink: %s: enable failed (0x%x)\n",
@@ -656,9 +595,7 @@ static void scsilink_finish(void)
 		scsilink_delay(HZ / 2);
 
 		/* Read MAC + stats (0x09, 18 bytes) into the RX buffer. */
-		memset(cmd, 0, sizeof(cmd));
-		cmd[0] = SCSILINK_CMD_STATS;
-		cmd[4] = SCSILINK_STATS_LEN;
+		daynaport_cdb6(cmd, SCSILINK_CMD_STATS, SCSILINK_STATS_LEN, 0);
 		rc = scsilink_scsi_sync(dp, cmd, dp->rbuf, SCSILINK_STATS_LEN);
 		if (rc) {
 			printk("scsilink: %s: MAC read failed (0x%x)\n",
@@ -717,6 +654,16 @@ int init_module(void)
 	if (scsilink_poll  < 1) scsilink_poll  = 1;
 	scsilink_poll0 = (poll0_ms * HZ) / 1000;
 	if (scsilink_poll0 < 1) scsilink_poll0 = 1;
+
+	/* Clamp the requested READ length into [MIN, buffer]: too small and BlueSCSI
+	 * packs zero frames (RX stalls); larger than the buffer is incoherent. */
+	if (rx_req_len < SCSILINK_RX_REQ_MIN || rx_req_len > SCSILINK_RBUF_LEN) {
+		int c = rx_req_len < SCSILINK_RX_REQ_MIN
+		      ? SCSILINK_RX_REQ_MIN : SCSILINK_RBUF_LEN;
+		printk("scsilink: rx_req_len %d out of [%d, %d]; using %d\n",
+		       rx_req_len, SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN, c);
+		rx_req_len = c;
+	}
 
 	scsilink_template.usage_count = &mod_use_count_;
 	return scsi_register_module(MODULE_SCSI_DEV, &scsilink_template);

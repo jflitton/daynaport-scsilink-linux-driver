@@ -59,7 +59,10 @@ SOURCE    = scsilink.c
 
 # The driver includes "scsi.h"/"hosts.h" with quotes; those live in the kernel's
 # drivers/scsi directory, not on the normal include path -- so add it explicitly.
-INCLUDES  = -I$(KERNEL)/include -I$(KERNEL)/drivers/scsi
+# It also includes the shared "daynaport.h" from the repo's top-level lib/ (one
+# level up from this version dir); make-release vendors that header alongside the
+# source, so a released tarball finds it via the local (quote) search instead.
+INCLUDES  = -I$(KERNEL)/include -I$(KERNEL)/drivers/scsi -I../lib
 
 WARN      = -Wall -Wstrict-prototypes
 OPT       = -O2 -fomit-frame-pointer -fno-strength-reduce
