@@ -63,21 +63,23 @@
  * ----------------------------------------------------------------------- */
 
 /* Default and floor for rx_req_len (below): the allocation length we put in the
- * READ CDB.  It is only a hint -- the device may return less, more, or ignore
- * it.  BlueSCSI (blind mode, cdb[5]=0xC0) packs frames into one response until
+ * READ CDB.  It is only a hint -- the device may return less or cap it.  BlueSCSI
+ * and ZuluSCSI are both based on SCSI2SD: in blind mode (cdb[5]=0xC0) the
+ * firmware packs frames into one response until
  * "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size" (network.c,
- * DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its bus-hold guard;
- * 4096 leaves room for that 2-frame batch.  ZuluSCSI ignores the field outright.
- * The floor matters: below ~1530 BlueSCSI cannot pack even one max-size frame,
- * so RX would silently stall -- hence SCSILINK_RX_REQ_MIN.  The ceiling is
- * SCSILINK_RBUF_LEN (requesting more than the buffer is incoherent). */
+ * DAYNAPORT_SCSI_PACKET_MAX = 1524), then hard-stops at 2 frames on a bus-hold
+ * guard; 4096 leaves room for
+ * that 2-frame batch.  The floor matters: below ~1530 the firmware cannot pack
+ * even one max-size frame, so RX would silently stall -- hence
+ * SCSILINK_RX_REQ_MIN.  The ceiling is SCSILINK_RBUF_LEN (requesting more than
+ * the buffer is incoherent). */
 #define SCSILINK_RX_REQ		4096	/* default rx_req_len, bytes */
 #define SCSILINK_RX_REQ_MIN	2048	/* floor: >= one full frame + pack overhead */
 
 /* RX SCSI transfer buffer.  Sized generously to hold a large multi-frame
- * response.  We never assume how much the device returns: BlueSCSI bounds a
- * batch to the requested length, but ZuluSCSI ignores the request and caps only
- * on a byte budget, so it can return more than we ask for.  The poll zeroes this
+ * response.  We never assume how much the device returns: a batch is a
+ * variable-length run of frames (up to the firmware's 2-frame cap) and we do not
+ * trust the device's length/flag fields to bound it.  The poll zeroes this
  * WHOLE buffer before each READ so a zero-length terminator always lands after
  * the data (however much arrives), and daynaport_rx_parse() walks records
  * bounded by this length.  No GFP_DMA needed: the block layer bounces for any
@@ -270,9 +272,10 @@ static int scsilink_rx_poll(struct scsilink *dp)
 
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how daynaport_rx_parse() knows
-	 * to stop.  Zero the ENTIRE buffer, not just the requested length: a batch
-	 * exceeding rx_req_len (ZuluSCSI ignores the request) would otherwise run
-	 * past the cleared region into stale bytes that parse as a bogus record. */
+	 * to stop.  Zero the ENTIRE buffer, not just the requested length: the buffer
+	 * is sized for a worst-case batch and we rely on the cleared terminator
+	 * landing after whatever arrives, so a short pre-zero could leave stale bytes
+	 * that parse as a bogus record. */
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
 	daynaport_cdb6(cdb, SCSILINK_CMD_RECV, rx_req_len, SCSILINK_RECV_FLAG);

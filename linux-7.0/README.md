@@ -5,8 +5,8 @@ out-of-tree as a loadable module (`scsilink.ko`) via kbuild against a configured
 7.x kernel tree. See the [project README](../README.md) for the overview and the
 shared protocol constants + RX parser in [`lib/`](../lib).
 
-Tested on x86-64 / Symbios 53c875 (Diamond FirePort 40) / BlueSCSI V2 release v2026.04.27,
-on kernel 7.0.12.
+Tested on x86-64 (AMD A10-7700K) / Adaptec AHA-2940UW / ZuluSCSI Blaster with FW v2026.06.12,
+on kernel 7.0.12 (Fedora 44).
 
 ## Install
 
@@ -32,13 +32,6 @@ make                  # build scsilink.ko against /lib/modules/`uname -r`/build
 make KDIR=/usr/src/linux   # ...or against another kernel tree
 make install          # modules_install + depmod (as root)
 modprobe scsilink     # load now
-```
-
-Then bring the interface up as any NIC:
-
-```sh
-ip addr add 192.168.1.50/24 dev eth0
-ip link set eth0 up
 ```
 
 > **Secure Boot:** `make install` tries to sign the module with the kernel's
@@ -75,20 +68,23 @@ the adapter with empty READs), because the receive ceiling is set by the per-REA
 round-trip and the adapter, not the host poll rate. The knobs are most useful for
 characterization and on much slower hosts.
 
-`rx_req_len` is headroom for targets that honor a larger request: BlueSCSI
-hard-caps a batch at 2 frames and ZuluSCSI ignores the field entirely, so raising
-it changes nothing on those two — the default 4096 already covers BlueSCSI's
-max batch.
+`rx_req_len` is headroom for targets that honor a larger request. ZuluSCSI and
+BlueSCSI are both based on SCSI2SD, whose firmware hard-caps a batch at 2 frames,
+so raising it past the default changes nothing on those two — the default 4096
+already covers that 2-frame max batch.
 
 `tx_burst` arbitrates the device's one-command-at-a-time channel: the poll loop
 sends at most this many frames before forcing an RX poll. Since the device cannot
 transmit and receive at once, a large burst favors upload throughput (back-to-back
 WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
 (inbound ACKs and replies drain sooner instead of overflowing the adapter's small
-RX FIFO while the host holds the bus writing). The default 16 sends the whole
-queue each cycle, which measured best on the test rig — there the inbound loss
-under a sustained upload is bounded by the adapter's FIFO, not by scheduling, so
-shrinking the burst only cost throughput. Lower it if your setup benefits.
+RX FIFO while the host holds the bus writing). The default of 16 tends to be optimal.
+
+## Performance
+Download performance is about 970kB/sec on a relatively fast machine
+
+The RX poll cadence and READ request size can be tuned at load time without
+rebuilding:
 
 ## Files
 
@@ -96,7 +92,7 @@ shrinking the burst only cost throughput. Lower it if your setup benefits.
 |--------------|-------------------------------------------------------|
 | `scsilink.c` | the driver (`#include`s the shared `lib/daynaport.h`) |
 | `Makefile`   | out-of-tree kbuild module (`obj-m`, `-I../lib`)       |
-| `install.sh` | build + install + boot autoload                       |
+| `install.sh` | build + install                                       |
 | `CHANGES`    | release history                                       |
 
 ## License

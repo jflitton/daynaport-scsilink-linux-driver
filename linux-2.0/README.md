@@ -2,8 +2,6 @@
 
 The **Linux 2.0.x** build of the DaynaPORT SCSI/Link Ethernet driver. Builds
 out-of-tree as a loadable module (`scsilink.o`) against any 2.0.x kernel source.
-See the [project README](../README.md) for the overview and the shared protocol
-constants + RX parser in [`lib/`](../lib).
 
 Tested on 486SLC @ 33MHz / Adaptec AHA-1542 / BlueSCSI V2 release v2026.04.27.
 
@@ -30,16 +28,10 @@ make install                         # install + depmod
 modprobe scsilink                    # load now (or: insmod scsilink.o)
 ```
 
-Then bring the interface up as you would any NIC (on Slackware, set the address
-in `/etc/rc.d/rc.inet1`):
-
-```sh
-ifconfig eth0 192.168.1.50 netmask 255.255.255.0 up
-route add default gw 192.168.1.1
-```
+Then configure the interface up as you would any NIC
 
 ## Performance
-Download performance is about 70kB/sec on a 486/33, limited by the fact that receives
+Download performance is about 70kB/sec, limited by the fact that receives
 aren't interrupt-driven -- we have to poll for them.  Upload performance is 3-4x better
 as we do have the benefit of interrupts when packets are sent.
 
@@ -54,8 +46,7 @@ insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # these 
 `fast_hold` how many empty polls to stay at the fast rate before relaxing to idle
 (all in milliseconds). `rx_req_len` is the byte count requested per READ — the
 device may cap or ignore it, and it is clamped to 2048–16384; the default 4096
-already covers BlueSCSI's max 2-frame batch, so raising it changes nothing on
-BlueSCSI or ZuluSCSI.
+already covers ZuluSCSI/BlueSCSI's max 2-frame batch, so raising it changes nothing.
 
 ## Files
 

@@ -1,4 +1,4 @@
-DaynaPORT SCSI/Link Linux driver (Linux 7.x) -- change history
+DaynaPORT SCSI/Link Linux 7.x driver -- change history
 
-0.1  (unreleased)
-`     Initial version for kernel 7.0
+0.1  2026-06-15
+     Initial release.

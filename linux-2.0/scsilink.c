@@ -4,8 +4,8 @@
  * Copyright (C) 2026 Jeff Flitton <jeff@flitton.dev>
  *
  * A SCSI upper-level device driver that binds to a DaynaPORT
- * SCSI/Link Ethernet adapter (as emulated by BlueSCSI V2 / PiSCSI) and
- * presents it to Linux as a standard Ethernet interface
+ * SCSI/Link Ethernet adapter (as emulated by ZuluSCSI / BlueSCSI V2 / PiSCSI)
+ * and presents it to Linux as a standard Ethernet interface
  *
  * The device is a SCSI Processor device (type 0x03, vendor "Dayna",
  * product "SCSI/Link") that moves Ethernet frames with vendor SCSI opcodes:
@@ -74,29 +74,30 @@
  * reference/daynaport.md).  The driver-policy tunables below stay here. */
 
 /* Default and floor for rx_req_len (below): the allocation length we put in the
- * READ CDB.  It is only a hint -- the device may return less, more, or ignore
- * it.  BlueSCSI (blind mode, cdb[5]=0xC0) packs frames into one response until
+ * READ CDB.  It is only a hint -- the device may return less or cap it.  BlueSCSI
+ * and ZuluSCSI are both based on SCSI2SD: in blind mode (cdb[5]=0xC0) the
+ * firmware packs frames into one response until
  * "total + DAYNAPORT_SCSI_PACKET_MAX + 6 > size" (network.c,
- * DAYNAPORT_SCSI_PACKET_MAX = 1524), capped at 2 frames by its bus-hold guard;
- * 4096 leaves room for that 2-frame batch.  ZuluSCSI ignores the field outright.
- * The floor matters: below ~1530 BlueSCSI cannot pack even one max-size frame,
- * so RX would silently stall -- hence SCSILINK_RX_REQ_MIN.  The ceiling is
- * SCSILINK_RBUF_LEN (requesting more than the buffer is incoherent).
+ * DAYNAPORT_SCSI_PACKET_MAX = 1524), then hard-stops at 2 frames on a bus-hold
+ * guard; 4096 leaves room for
+ * that 2-frame batch.  The floor matters: below ~1530 the firmware cannot pack
+ * even one max-size frame, so RX would silently stall -- hence
+ * SCSILINK_RX_REQ_MIN.  The ceiling is SCSILINK_RBUF_LEN (requesting more than
+ * the buffer is incoherent).
  */
 #define SCSILINK_RX_REQ		4096	/* default rx_req_len, bytes */
 #define SCSILINK_RX_REQ_MIN	2048	/* floor: >= one full frame + pack overhead */
 
 /* RX SCSI transfer (DMA) buffer, and the length handed to scsi_do_cmd.  Sized
  * generously (NetBSD uses the same 16K) to hold a large multi-frame response.
- * We never assume how much the device returns: BlueSCSI bounds a batch to the
- * requested length, but ZuluSCSI ignores the request and caps only on a byte
- * budget, so it can return more than we ask for.
- * scsilink_rx_kick() zeroes this WHOLE buffer
+ * We never assume how much the device returns: a batch is a variable-length run
+ * of frames (up to the firmware's 2-frame cap) and we do not trust the device's
+ * length/flag fields to bound it.  scsilink_rx_kick() zeroes this WHOLE buffer
  * before each READ so a zero-length terminator always lands after the data
  * (however much arrives), and scsilink_rx() walks records bounded by this
  * length; a response larger than the buffer is simply received across
  * successive READs.  Do NOT shrink the pre-zero to the requested length -- a
- * batch exceeding it would run past the cleared region into stale bytes that
+ * larger batch would run past the cleared region into stale bytes that
  * parse as a bogus record.  MUST be GFP_DMA for 24-bit ISA DMA). */
 #define SCSILINK_RBUF_LEN		16384
 #define SCSILINK_TBUF_LEN		1536	/* one frame + slack */
@@ -334,12 +335,12 @@ static void scsilink_rx_kick(unsigned long arg)
 
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how scsilink_rx() knows to stop
-	 * (we do not trust the device's flag field for that; see scsilink_rx).  The
-	 * device can return more than SCSILINK_RX_REQ: ZuluSCSI (verified from its
-	 * source) ignores the requested length, so we don't assume the response fits
-	 * in it.  Zero the entire buffer to guarantee a terminator lands after
-	 * whatever it sends -- zeroing only the requested length lets a larger batch
-	 * run past the cleared region into stale bytes that parse as a bogus record. */
+	 * (we do not trust the device's flag field for that; see scsilink_rx).  We do
+	 * not assume the response fits in the requested length: the buffer is sized
+	 * for a worst-case batch and we let the cleared terminator mark the end.
+	 * Zero the entire buffer to guarantee a terminator lands after whatever it
+	 * sends -- zeroing only the requested length lets a larger batch run past the
+	 * cleared region into stale bytes that parse as a bogus record. */
 	memset(dp->rbuf, 0, SCSILINK_RBUF_LEN);
 
 	SCpnt->cmd_len = 0;

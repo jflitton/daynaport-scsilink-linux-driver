@@ -1,4 +1,4 @@
-DaynaPORT SCSI/Link Linux driver -- change history
+DaynaPORT SCSI/Link Linux 2.0 driver -- change history
 
 0.4  2026-06-13
       - Refactored shared code into lib/
