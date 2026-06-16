@@ -254,15 +254,19 @@ static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
  * Issue one READ(6) and deliver whatever frames come back.  The DaynaPORT ends
  * the DATA-IN phase early (variable-length responses), which the HBA reports as
  * a short transfer -- so we trust the self-describing, length-checked buffer
- * rather than the SCSI result and parse regardless.  Returns the unicast
- * (to-us) frame count -- the fast/idle cadence keys off that, so broadcast and
- * multicast chatter is delivered but does not pin us in fast-poll.
+ * rather than the SCSI result and parse regardless.  Returns the TOTAL frame
+ * count delivered (nonzero keeps the poll loop hot, polling the next READ
+ * back-to-back); the unicast (to-us) count comes back via *ucast and drives the
+ * fast/idle backoff, so broadcast/multicast chatter is delivered but does not
+ * pin us in fast-poll.
  */
-static int scsilink_rx_poll(struct scsilink *dp)
+static int scsilink_rx_poll(struct scsilink *dp, int *ucast)
 {
 	unsigned char cdb[6];
 	int errors = 0;
-	int ucast = 0;
+	int got;
+
+	*ucast = 0;
 
 	/* Pre-zero the whole buffer so the bytes just past the device's data read
 	 * back as a zero-length header -- which is how daynaport_rx_parse() knows
@@ -276,10 +280,10 @@ static int scsilink_rx_poll(struct scsilink *dp)
 
 	scsilink_scsi(dp, cdb, REQ_OP_DRV_IN, dp->rbuf, SCSILINK_RBUF_LEN);
 
-	daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
-			   scsilink_deliver, dp, &errors, &ucast);
+	got = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+				 scsilink_deliver, dp, &errors, ucast);
 	dp->dev->stats.rx_errors += errors;
-	return ucast;
+	return got;
 }
 
 /* ----------------------------------------------------------------------- *
@@ -323,21 +327,27 @@ static int scsilink_poll_thread(void *arg)
 	struct scsilink *dp = arg;
 	struct sk_buff *skb;
 	bool fast = false;
-	int n;
+	bool rx_hot = false;
+	int n, ucast;
 
 	while (!kthread_should_stop()) {
-		/* Read the cadence knobs live so runtime sysfs writes take effect
-		 * on the next poll without a reload.  `fast` is the rate the shared
-		 * cadence policy chose after the previous poll. */
-		int ms = fast ? poll0_ms : poll_ms;
-		unsigned long to = max_t(unsigned long, msecs_to_jiffies(ms), 1);
 		int sent = 0;
 
-		/* Sleep until a frame is queued, we're asked to stop, or the poll
-		 * interval elapses -- whichever comes first. */
-		wait_event_interruptible_timeout(dp->wq,
-				!skb_queue_empty(&dp->txq) || kthread_should_stop(),
-				to);
+		/* Wait until a frame is queued, we're asked to stop, or the poll
+		 * interval elapses -- UNLESS the last READ returned data, in which case
+		 * poll the next one back-to-back.  A saturated download always has more
+		 * queued, and the synchronous READ itself paces us, so we drain at bus
+		 * speed instead of one batch per poll interval; we sleep only once a
+		 * READ comes back empty.  The cadence knobs are read live here, so
+		 * runtime sysfs writes take effect on the next sleep without a reload. */
+		if (!rx_hot) {
+			int ms = fast ? poll0_ms : poll_ms;
+			unsigned long to = max_t(unsigned long, msecs_to_jiffies(ms), 1);
+
+			wait_event_interruptible_timeout(dp->wq,
+					!skb_queue_empty(&dp->txq) || kthread_should_stop(),
+					to);
+		}
 		if (kthread_should_stop())
 			break;
 
@@ -345,8 +355,7 @@ static int scsilink_poll_thread(void *arg)
 		 * command slot to the RX poll below.  The device does one command at
 		 * a time: while we hold the bus writing, inbound frames (ACKs, ping
 		 * replies) pile up in the adapter's small RX FIFO and can overflow.
-		 * The wait above returns immediately while the queue is non-empty, so
-		 * capping the burst makes the loop a weighted tx_burst:1 round-robin
+		 * Capping the burst makes the loop a weighted tx_burst:1 round-robin
 		 * that guarantees RX a turn every tx_burst frames. */
 		while (sent < tx_burst && (skb = skb_dequeue(&dp->txq)) != NULL) {
 			scsilink_tx_one(dp, skb);
@@ -356,13 +365,15 @@ static int scsilink_poll_thread(void *arg)
 		if (netif_queue_stopped(dp->dev))
 			netif_wake_queue(dp->dev);
 
-		/* One RX poll, then let the shared policy pick the next rate: fast
-		 * while to-us frames are arriving and through a brief hold after
-		 * (a download's queue goes briefly empty as TCP's window breathes),
-		 * idle once that hold is spent.  Broadcast/multicast is delivered but
-		 * does not sustain fast-poll. */
-		n = scsilink_rx_poll(dp);
-		fast = daynaport_poll_fast(n, &dp->fast_left, fast_hold);
+		/* One RX poll.  Any frames returned mark RX "hot" so the next READ goes
+		 * back-to-back (above); the to-us count drives the shared fast/idle
+		 * backoff once a poll comes back empty: fast through a brief hold after
+		 * activity (a download's queue goes briefly empty as TCP's window
+		 * breathes), idle once that hold is spent.  Broadcast/multicast is
+		 * delivered but does not sustain fast-poll. */
+		n = scsilink_rx_poll(dp, &ucast);
+		rx_hot = (n > 0);
+		fast = daynaport_poll_fast(ucast, &dp->fast_left, fast_hold);
 	}
 	return 0;
 }
