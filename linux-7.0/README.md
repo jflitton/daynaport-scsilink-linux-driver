@@ -56,10 +56,11 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | Param        | Meaning                                                          |
 |--------------|------------------------------------------------------------------|
 | `poll_ms`    | idle interval — between READs when no data is waiting (ms)        |
-| `poll0_ms`   | fast interval — while data is flowing, and during the hold (ms)   |
+| `poll0_ms`   | fast interval — between empty READs during the post-activity hold (ms) |
 | `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
+| `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
 Measured on the test rig: ~5.6 Mbit/s TX, ~4.8 Mbit/s RX over the polled READ
 path. The defaults are already near-optimal — a `poll0_ms` sweep showed RX is

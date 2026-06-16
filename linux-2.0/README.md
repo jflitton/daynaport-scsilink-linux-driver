@@ -42,11 +42,18 @@ rebuilding:
 insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # these are the defaults
 ```
 
-`poll_ms` is the idle interval, `poll0_ms` the interval while data is flowing, and
-`fast_hold` how many empty polls to stay at the fast rate before relaxing to idle
-(all in milliseconds). `rx_req_len` is the byte count requested per READ — the
-device may cap or ignore it, and it is clamped to 2048–16384; the default 4096
-already covers ZuluSCSI/BlueSCSI's max 2-frame batch, so raising it changes nothing.
+A READ that returns frames is followed immediately by the next, so a live
+download polls back-to-back at the speed of the SCSI round-trip; the cadence
+knobs govern only *empty* polling. `poll_ms` is the idle interval (between empty
+READs when no data is waiting), `poll0_ms` the fast interval during the brief
+post-activity hold, and `fast_hold` how many empty polls to stay fast before
+relaxing to idle (all in milliseconds). `rx_req_len` is the byte count requested
+per READ — the device may cap or ignore it, and it is clamped to 2048–16384; the
+default 4096 already covers ZuluSCSI/BlueSCSI's max 2-frame batch, so raising it
+changes nothing.
+
+`debug=1` logs per-READ RX yield and rate every 256 READs (off by default) — handy
+for telling a poll-limited rig from a read-latency-limited one.
 
 ## Files
 

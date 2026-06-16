@@ -164,6 +164,13 @@ MODULE_PARM_DESC(rx_req_len,
 	"READ request length in bytes; device may cap or ignore it "
 	"(default 4096, clamped to [2048, 16384])");
 
+/* RX diagnostics, off by default.  When set, scsilink_rx() logs per-READ yield
+ * and rate every 256 READs -- the RX bottleneck varies by HBA/CPU and these
+ * targets have no profiler, so that line is the field diagnostic. */
+static int debug = 0;
+MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "log per-READ RX stats every 256 reads (default 0=off)");
+
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in dev->priv (allocated by init_etherdev).
  * ----------------------------------------------------------------------- */
@@ -324,6 +331,33 @@ static int scsilink_rx(struct scsilink *dp, int *ucast)
 	got = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
 				 scsilink_deliver, dp, &errors, ucast);
 	dp->stats.rx_errors += errors;
+
+	/* Optional RX diagnostics (module param `debug`, off by default): per-READ
+	 * yield + rate every 256 READs -- tells arrival-limited (mostly empty reads)
+	 * from host-pull-limited (full batches at a low read rate) on a given HBA/CPU.
+	 * Counters aggregate across all interfaces; fine for one DaynaPORT. */
+	if (debug) {
+		static unsigned long dbg_reads, dbg_empty, dbg_frames, dbg_t0;
+
+		if (dbg_reads == 0)
+			dbg_t0 = jiffies;
+		dbg_reads++;
+		dbg_frames += got;
+		if (got == 0)
+			dbg_empty++;
+		if (dbg_reads >= 256) {
+			unsigned long dt = jiffies - dbg_t0;
+
+			if (dt == 0)
+				dt = 1;
+			printk(KERN_INFO "scsilink: dbg 256 reads/%lu ticks = %lu reads/s, "
+			       "%lu empty, %lu frames (%lu.%02lu per read)\n",
+			       dt, (256UL * HZ) / dt, dbg_empty, dbg_frames,
+			       dbg_frames / 256, ((dbg_frames % 256) * 100) / 256);
+			dbg_reads = dbg_empty = dbg_frames = 0;
+		}
+	}
+
 	return got;
 }
 

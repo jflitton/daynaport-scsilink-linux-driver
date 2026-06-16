@@ -1,5 +1,12 @@
 DaynaPORT SCSI/Link Linux driver -- change history
 
-0.1  2026-06-16
+0.2  2026-06-16
+     - RX: poll continuously while frames are arriving -- re-issue the next
+       READ(6) immediately when the previous one returned data, falling back to
+       the cadence timer only on an empty poll.
+     - New debug module parameter (off by default): logs per-READ RX yield and
+       rate every 256 READs.
+
+0.1  2026-06-15
      Initial release.
      - Builds as a loadable module against any configured Linux 2.4.x kernel.

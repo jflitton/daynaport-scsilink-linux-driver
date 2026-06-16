@@ -54,6 +54,7 @@ insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=1
 | `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
+| `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
 A READ that returns frames is followed immediately by the next, so a live
 download polls back-to-back at the speed of the SCSI round-trip; the cadence
