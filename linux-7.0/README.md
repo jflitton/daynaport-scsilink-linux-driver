@@ -41,7 +41,7 @@ modprobe scsilink     # load now
 > either disable Secure Boot, or enroll your own MOK key and sign with it. With
 > Secure Boot off, the unsigned module loads normally.
 
-## Parameters
+## Performance Tuning
 
 There is no RX interrupt, so receive is polled. Three knobs control the RX
 cadence, `rx_req_len` sizes each READ request, and `tx_burst` balances TX against
@@ -61,8 +61,8 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 
-Measured on the test rig: ~5.6 Mbit/s TX, ~4.8 Mbit/s RX over the polled READ
-path. The defaults are already near-optimal — a `poll0_ms` sweep showed RX is
+Measured on the test rig: ~8.25 Mbit/s TX, ~7.75 Mbit/s RX. For this system,
+the defaults are already near-optimal — a `poll0_ms` sweep showed RX is
 flat from ~5–20 ms and actually *degrades* below that (polling harder just floods
 the adapter with empty READs), because the receive ceiling is set by the per-READ
 round-trip and the adapter, not the host poll rate. The knobs are most useful for
@@ -78,13 +78,8 @@ sends at most this many frames before forcing an RX poll. Since the device canno
 transmit and receive at once, a large burst favors upload throughput (back-to-back
 WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
 (inbound ACKs and replies drain sooner instead of overflowing the adapter's small
-RX FIFO while the host holds the bus writing). The default of 16 tends to be optimal.
-
-## Performance
-Download performance is about 970kB/sec on a relatively fast machine
-
-The RX poll cadence and READ request size can be tuned at load time without
-rebuilding:
+RX FIFO while the host holds the bus writing). In my test, the default of 16 looks
+to be about right.
 
 ## Files
 
