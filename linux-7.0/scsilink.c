@@ -50,7 +50,6 @@
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_driver.h>
-#include <scsi/scsi_eh.h>		/* struct scsi_sense_hdr */
 
 #include "daynaport.h"			/* shared DaynaPORT protocol defs + RX parser */
 
@@ -219,13 +218,8 @@ struct scsilink {
 static int scsilink_scsi(struct scsilink *dp, const unsigned char *cdb,
 			 blk_opf_t opf, void *buf, unsigned int len)
 {
-	struct scsi_sense_hdr sshdr;
-	const struct scsi_exec_args args = {
-		.sshdr = &sshdr,
-	};
-
 	return scsi_execute_cmd(dp->sdev, cdb, opf, buf, len,
-				SCSILINK_TIMEOUT, SCSILINK_RETRIES, &args);
+				SCSILINK_TIMEOUT, SCSILINK_RETRIES, NULL);
 }
 
 /* ----------------------------------------------------------------------- *

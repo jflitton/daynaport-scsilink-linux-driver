@@ -153,7 +153,6 @@ struct scsilink {
 	unsigned char		*tbuf;		/* GFP_DMA TX buffer */
 	int			running;	/* interface up + polling */
 	int			inited;		/* finish() hardware init done */
-	int			last_to;	/* last poll interval (ticks) */
 	int			fast_left;	/* fast polls remaining after activity */
 };
 
@@ -172,7 +171,6 @@ static int  scsilink_open(struct device *);
 static int  scsilink_stop(struct device *);
 static int  scsilink_xmit(struct sk_buff *, struct device *);
 static struct enet_statistics *scsilink_get_stats(struct device *);
-static void scsilink_set_multicast(struct device *);
 
 static void scsilink_rx_kick(unsigned long);
 static void scsilink_recv_done(Scsi_Cmnd *);
@@ -381,7 +379,6 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 	 */
 	next = daynaport_poll_fast(n, &dp->fast_left, fast_hold)
 	     ? scsilink_poll0 : scsilink_poll;
-	dp->last_to = next;
 	dp->rx_timer.expires = jiffies + next;
 	add_timer(&dp->rx_timer);
 }
@@ -471,7 +468,6 @@ static int scsilink_open(struct device *dev)
 	dev->interrupt  = 0;
 	dev->start      = 1;
 
-	dp->last_to = scsilink_poll;
 	dp->rx_timer.expires = jiffies + scsilink_poll;
 	add_timer(&dp->rx_timer);
 
@@ -499,13 +495,6 @@ static struct enet_statistics *scsilink_get_stats(struct device *dev)
 {
 	struct scsilink *dp = (struct scsilink *) dev->priv;
 	return &dp->stats;
-}
-
-/* v1: no multicast filtering.  BlueSCSI ignores 0x0D and 2.0f receives all
- * broadcast anyway; and this hook may run where we cannot sleep to issue a
- * SCSI command.  See reference/daynaport.md s4.6. */
-static void scsilink_set_multicast(struct device *dev)
-{
 }
 
 /* ----------------------------------------------------------------------- *
@@ -568,7 +557,6 @@ static int scsilink_attach(Scsi_Device *sd)
 	dev->stop		= scsilink_stop;
 	dev->hard_start_xmit	= scsilink_xmit;
 	dev->get_stats		= scsilink_get_stats;
-	dev->set_multicast_list	= scsilink_set_multicast;
 
 	dp->rx_timer.data     = (unsigned long) dp;
 	dp->rx_timer.function = scsilink_rx_kick;
