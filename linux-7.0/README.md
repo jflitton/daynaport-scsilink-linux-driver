@@ -62,12 +62,12 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 | `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
-Measured on the test rig: ~5.6 Mbit/s TX, ~4.8 Mbit/s RX over the polled READ
-path. The defaults are already near-optimal — a `poll0_ms` sweep showed RX is
-flat from ~5–20 ms and actually *degrades* below that (polling harder just floods
-the adapter with empty READs), because the receive ceiling is set by the per-READ
-round-trip and the adapter, not the host poll rate. The knobs are most useful for
-characterization and on much slower hosts.
+A READ that returns frames is followed immediately by the next, so a live transfer
+polls back-to-back at the speed of the SCSI round-trip; the cadence knobs govern
+only *empty* polling — how often to probe when no data is waiting. The defaults are
+already near-optimal; pushing `poll0_ms` toward continuous *empty* polling tends to
+*hurt*, since hammering the adapter with empty READs starves its frame handling.
+The knobs are most useful for characterization and on much slower hosts.
 
 `rx_req_len` is headroom for targets that honor a larger request. ZuluSCSI and
 BlueSCSI are both based on SCSI2SD, whose firmware hard-caps a batch at 2 frames,
@@ -82,10 +82,11 @@ WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
 RX FIFO while the host holds the bus writing). The default of 16 tends to be optimal.
 
 ## Performance
-Download performance is about 970kB/sec on a relatively fast machine
-
-The RX poll cadence and READ request size can be tuned at load time without
-rebuilding:
+Download runs about 995kB/sec, upload about 1.18MB/sec. Receive has no interrupt —
+nothing signals inbound frames — so it polls for them; with productive READs now
+issued back-to-back instead of on a fixed interval, download runs close to the
+upload rate, trailing it only by the slightly heavier READ round-trip over a WRITE
+on this adapter.
 
 ## Files
 

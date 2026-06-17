@@ -31,9 +31,12 @@ modprobe scsilink                    # load now (or: insmod scsilink.o)
 Then configure the interface up as you would any NIC
 
 ## Performance
-Download performance is about 70kB/sec, limited by the fact that receives
-aren't interrupt-driven -- we have to poll for them.  Upload performance is 3-4x better
-as we do have the benefit of interrupts when packets are sent.
+Download runs about 250kB/sec, upload about 330kB/sec on a 486SLC @ 33Mhz.
+The gap is the SCSI side, not the link. Nothing signals inbound frames, 
+so receive has to poll for them with READ(6) commands, spending bus time
+probing even when no frame is waiting. Transmit never polls — the stack 
+hands us a frame when there's one to send, so a WRITE only happens when there's
+real work. That polling asymmetry is the gap.
 
 The RX poll cadence and READ request size can be tuned at load time without
 rebuilding:
