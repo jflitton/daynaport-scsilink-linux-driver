@@ -1,5 +1,13 @@
 DaynaPORT SCSI/Link Linux 2.0 driver -- change history
 
+0.5  2026-06-16
+      - RX: poll continuously while frames are arriving -- re-issue the next
+        READ(6) immediately (via the immediate task queue) instead of waiting a
+        poll interval, falling back to the timer only once a READ comes back
+        empty.
+      - New debug module parameter (off by default): logs per-READ RX yield and
+        rate every 256 READs, to characterize the bottleneck on a given HBA/CPU.
+
 0.4  2026-06-13
       - Refactored shared code into lib/
 

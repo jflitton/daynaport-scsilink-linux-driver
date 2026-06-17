@@ -46,7 +46,8 @@
 #include <linux/malloc.h>
 #include <linux/timer.h>
 #include <linux/errno.h>
-#include <linux/interrupt.h>		/* mark_bh, NET_BH */
+#include <linux/interrupt.h>		/* mark_bh, NET_BH, IMMEDIATE_BH */
+#include <linux/tqueue.h>		/* tq_immediate, queue_task (deferred re-issue) */
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -140,6 +141,12 @@ static int scsilink_poll0 = ((HZ / 50) ? (HZ / 50) : 1);	/* fast, ticks */
  * poll path can use it unguarded. */
 static int rx_req_len = SCSILINK_RX_REQ;
 
+/* RX diagnostics, off by default.  A bare module parameter (insmod scsilink.o
+ * debug=1): when set, scsilink_rx() logs per-READ yield and rate every 256
+ * READs.  Kept because the RX bottleneck varies by HBA/CPU and these targets
+ * have no profiler -- that one line is the diagnostic. */
+static int debug = 0;
+
 /* ----------------------------------------------------------------------- *
  *  Per-interface state.  Lives in dev->priv (allocated by init_etherdev).
  * ----------------------------------------------------------------------- */
@@ -148,7 +155,8 @@ struct scsilink {
 	struct device		*dev;		/* the net interface */
 	Scsi_Device		*sdev;		/* our SCSI target */
 	struct enet_statistics	stats;
-	struct timer_list	rx_timer;
+	struct timer_list	rx_timer;	/* paces RX polling when idle/empty */
+	struct tq_struct	rx_task;	/* immediate-BH re-issue while RX is hot */
 	unsigned char		*rbuf;		/* GFP_DMA RX buffer */
 	unsigned char		*tbuf;		/* GFP_DMA TX buffer */
 	int			running;	/* interface up + polling */
@@ -173,6 +181,7 @@ static int  scsilink_xmit(struct sk_buff *, struct device *);
 static struct enet_statistics *scsilink_get_stats(struct device *);
 
 static void scsilink_rx_kick(unsigned long);
+static void scsilink_rx_task(void *);
 static void scsilink_recv_done(Scsi_Cmnd *);
 static void scsilink_send_done(Scsi_Cmnd *);
 
@@ -289,19 +298,47 @@ static void scsilink_deliver(void *ctx, const unsigned char *frame, int len)
  * Parse a READ response out of the (pre-zeroed) RX buffer, delivering each frame
  * via scsilink_deliver().  The walk itself -- record framing, the zero-length
  * terminator, why the device's "more" flag is ignored -- lives in the shared
- * daynaport_rx_parse() (daynaport.h).  Returns the unicast (to-us) frame count
- * -- the fast/idle cadence keys off that, so broadcast/multicast chatter is
- * delivered but does not pin us in fast-poll.
+ * daynaport_rx_parse() (daynaport.h).  Returns the TOTAL frame count delivered
+ * (nonzero keeps RX polling the next READ back-to-back); the unicast (to-us)
+ * count comes back via *ucast, which the fast/idle backoff keys off so
+ * broadcast/multicast chatter is delivered but does not pin us in fast-poll.
  */
-static int scsilink_rx(struct scsilink *dp)
+static int scsilink_rx(struct scsilink *dp, int *ucast)
 {
 	int errors = 0;
-	int ucast = 0;
+	int got;
 
-	daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
-			   scsilink_deliver, dp, &errors, &ucast);
+	*ucast = 0;
+	got = daynaport_rx_parse(dp->rbuf, SCSILINK_RBUF_LEN,
+				 scsilink_deliver, dp, &errors, ucast);
 	dp->stats.rx_errors += errors;
-	return ucast;
+
+	/* Optional RX diagnostics (module param `debug`, off by default): per-READ
+	 * yield + rate every 256 READs -- tells arrival-limited (mostly empty reads)
+	 * from host-pull-limited (full batches at a low read rate) on a given
+	 * HBA/CPU.  Counters aggregate across all interfaces; fine for one DaynaPORT. */
+	if (debug) {
+		static unsigned long dbg_reads, dbg_empty, dbg_frames, dbg_t0;
+
+		if (dbg_reads == 0)
+			dbg_t0 = jiffies;
+		dbg_reads++;
+		dbg_frames += got;
+		if (got == 0)
+			dbg_empty++;
+		if (dbg_reads >= 256) {
+			unsigned long dt = jiffies - dbg_t0;
+			if (dt == 0)
+				dt = 1;
+			printk("scsilink: dbg 256 reads/%lu ticks = %lu reads/s, "
+			       "%lu empty, %lu frames (%lu.%02lu per read)\n",
+			       dt, (256UL * HZ) / dt, dbg_empty, dbg_frames,
+			       dbg_frames / 256, ((dbg_frames % 256) * 100) / 256);
+			dbg_reads = dbg_empty = dbg_frames = 0;
+		}
+	}
+
+	return got;
 }
 
 /* RX poll timer: issue a READ(6).  Bottom-half context - must not sleep. */
@@ -349,11 +386,22 @@ static void scsilink_rx_kick(unsigned long arg)
 		    SCSILINK_TIMEOUT, SCSILINK_RETRIES);
 }
 
-/* READ(6) completion - interrupt context.  Deliver packets, re-arm poll. */
+/* Immediate-queue task: re-issue a READ off the completion path so a productive
+ * download polls back-to-back instead of waiting out a poll interval.  Runs in
+ * IMMEDIATE_BH context -- a safe place to call scsi_do_cmd(), exactly like the
+ * timer -- so a synchronous completion cannot recurse through scsi_do_cmd().
+ * Shares scsilink_rx_kick(): if a TX grabbed the command block first, that path
+ * falls back to the timer. */
+static void scsilink_rx_task(void *data)
+{
+	scsilink_rx_kick((unsigned long) data);
+}
+
+/* READ(6) completion - interrupt context.  Deliver packets, then re-issue. */
 static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 {
 	struct scsilink *dp = scsilink_find(SCpnt->device);
-	int n = 0, next;
+	int got = 0, ucast = 0, fast;
 
 	if (dp != NULL) {
 		/* The DaynaPORT ends the DATA-IN phase early (variable-length
@@ -361,7 +409,7 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 		 * (non-DID_OK) result even though the data is fine.  So we trust
 		 * the self-describing, length-checked buffer rather than the SCSI
 		 * host status and parse regardless. */
-		n = scsilink_rx(dp);
+		got = scsilink_rx(dp, &ucast);
 	}
 
 	/* release the command block */
@@ -371,16 +419,28 @@ static void scsilink_recv_done(Scsi_Cmnd *SCpnt)
 	if (dp == NULL || !dp->running)
 		return;
 
-	/*
-	 * Re-arm the poll at the rate the shared cadence policy picks
-	 * (daynaport_poll_fast): fast while to-us frames are arriving and through
-	 * a brief hold afterwards (a download's queue goes briefly empty as TCP's
-	 * window breathes), idle once that hold is spent.
+	/* Maintain the fast/idle hold counter from the to-us count (broadcast does
+	 * not pin fast-poll), then pick the next poll:
+	 *
+	 *   got > 0  the adapter likely has more frames queued -- re-issue the next
+	 *            READ immediately via the immediate task queue, so a saturated
+	 *            download polls back-to-back at the speed of the SCSI round-trip
+	 *            instead of waiting out a poll interval.  We defer through a
+	 *            bottom half rather than calling scsi_do_cmd() straight from this
+	 *            completion (which could recurse into the mid-layer).  TX stays
+	 *            fair: a queued frame's NET_BH runs before our IMMEDIATE_BH, so
+	 *            an ACK takes the command block first and RX falls to the timer
+	 *            for that one cycle.
+	 *   got == 0 nothing waiting -- relax to the timer at the fast/idle cadence.
 	 */
-	next = daynaport_poll_fast(n, &dp->fast_left, fast_hold)
-	     ? scsilink_poll0 : scsilink_poll;
-	dp->rx_timer.expires = jiffies + next;
-	add_timer(&dp->rx_timer);
+	fast = daynaport_poll_fast(ucast, &dp->fast_left, fast_hold);
+	if (got > 0) {
+		queue_task(&dp->rx_task, &tq_immediate);
+		mark_bh(IMMEDIATE_BH);
+	} else {
+		dp->rx_timer.expires = jiffies + (fast ? scsilink_poll0 : scsilink_poll);
+		add_timer(&dp->rx_timer);
+	}
 }
 
 /* ----------------------------------------------------------------------- *
@@ -561,6 +621,8 @@ static int scsilink_attach(Scsi_Device *sd)
 	dp->rx_timer.data     = (unsigned long) dp;
 	dp->rx_timer.function = scsilink_rx_kick;
 	init_timer(&dp->rx_timer);
+	dp->rx_task.routine   = scsilink_rx_task;	/* sync/next zeroed by memset above */
+	dp->rx_task.data      = dp;
 
 	scsilink_devs[i] = dp;
 	scsilink_template.nr_dev++;
@@ -664,6 +726,11 @@ int init_module(void)
 		       rx_req_len, SCSILINK_RX_REQ_MIN, SCSILINK_RBUF_LEN, c);
 		rx_req_len = c;
 	}
+
+	printk("scsilink: poll_ms=%d (%d ticks), poll0_ms=%d (%d ticks), "
+	       "fast_hold=%d, rx_req_len=%d (HZ=%d)\n",
+	       poll_ms, scsilink_poll, poll0_ms, scsilink_poll0,
+	       fast_hold, rx_req_len, HZ);
 
 	scsilink_template.usage_count = &mod_use_count_;
 	return scsi_register_module(MODULE_SCSI_DEV, &scsilink_template);

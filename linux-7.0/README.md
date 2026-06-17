@@ -43,10 +43,10 @@ modprobe scsilink     # load now
 
 ## Performance Tuning
 
-There is no RX interrupt, so receive is polled. Three knobs control the RX
-cadence, `rx_req_len` sizes each READ request, and `tx_burst` balances TX against
-RX on the device's single command slot. They are all **writable at runtime** as
-well as settable at load (the poll loop reads them live each cycle):
+The knobs below tune the RX poll cadence, READ request size, and TX/RX arbitration
+(see [How it works](../README.md#how-it-works) for the device behavior they tune).
+On 7.x they are all **writable at runtime** as well as settable at load — the poll
+loop re-reads them live each cycle:
 
 ```sh
 modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=16   # at load (defaults shown)
@@ -56,10 +56,11 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | Param        | Meaning                                                          |
 |--------------|------------------------------------------------------------------|
 | `poll_ms`    | idle interval — between READs when no data is waiting (ms)        |
-| `poll0_ms`   | fast interval — while data is flowing, and during the hold (ms)   |
+| `poll0_ms`   | fast interval — between empty READs during the post-activity hold (ms) |
 | `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
+| `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
 Measured on the test rig: ~8.25 Mbit/s TX, ~7.75 Mbit/s RX. For this system,
 the defaults are already near-optimal — a `poll0_ms` sweep showed RX is
