@@ -2,6 +2,8 @@
 
 The **Linux 2.0.x** build of the DaynaPORT SCSI/Link Ethernet driver. Builds
 out-of-tree as a loadable module (`scsilink.o`) against any 2.0.x kernel source.
+See the [project README](../README.md) for the overview and the shared protocol
+constants + RX parser in [`lib/`](../lib).
 
 Tested on 486SLC @ 33MHz / Adaptec AHA-1542 / BlueSCSI V2 release v2026.04.27.
 
@@ -32,11 +34,9 @@ Then configure the interface up as you would any NIC
 
 ## Performance
 Download runs about 250kB/sec, upload about 330kB/sec on a 486SLC @ 33Mhz.
-The gap is the SCSI side, not the link. Nothing signals inbound frames, 
-so receive has to poll for them with READ(6) commands, spending bus time
-probing even when no frame is waiting. Transmit never polls — the stack 
-hands us a frame when there's one to send, so a WRITE only happens when there's
-real work. That polling asymmetry is the gap.
+The gap is the SCSI side, not the link: receive has to poll while transmit does
+not (see [How it works](../README.md#how-it-works)). Command completions are
+interrupt-driven in both directions; the asymmetry is the polling, not interrupts.
 
 The RX poll cadence and READ request size can be tuned at load time without
 rebuilding:
@@ -45,18 +45,18 @@ rebuilding:
 insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096   # these are the defaults
 ```
 
-A READ that returns frames is followed immediately by the next, so a live
-download polls back-to-back at the speed of the SCSI round-trip; the cadence
-knobs govern only *empty* polling. `poll_ms` is the idle interval (between empty
-READs when no data is waiting), `poll0_ms` the fast interval during the brief
-post-activity hold, and `fast_hold` how many empty polls to stay fast before
-relaxing to idle (all in milliseconds). `rx_req_len` is the byte count requested
-per READ — the device may cap or ignore it, and it is clamped to 2048–16384; the
-default 4096 already covers ZuluSCSI/BlueSCSI's max 2-frame batch, so raising it
-changes nothing.
+`poll_ms` is the idle interval (between empty READs when no data is waiting),
+`poll0_ms` the fast interval during the brief post-activity hold, and `fast_hold`
+how many empty polls to stay fast before relaxing to idle (all in milliseconds).
+`rx_req_len` is the byte count requested per READ — the device may cap or ignore
+it, and it is clamped to 2048–16384; the default 4096 already covers the device's
+max batch, so raising it changes nothing.
 
 `debug=1` logs per-READ RX yield and rate every 256 READs (off by default) — handy
 for telling a poll-limited rig from a read-latency-limited one.
+
+There is no `tx_burst` knob (unlike 2.4/7.x): TX and RX contend for the single
+command block directly, so arbitration is implicit rather than tunable.
 
 ## Files
 

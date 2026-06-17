@@ -38,10 +38,10 @@ Then bring the interface up as you would any NIC.
 
 ## Parameters
 
-There is no RX interrupt, so receive is polled. Three knobs control the RX
-cadence, `rx_req_len` sizes each READ request, and `tx_burst` balances TX against
-RX on the device's single command slot. They are set at load time (Linux 2.4
-module parameters are not writable at runtime):
+The knobs below tune the RX poll cadence, READ request size, and TX/RX arbitration
+(see [How it works](../README.md#how-it-works) for the device behavior they tune).
+On 2.4 they are set at load time only — module parameters are not writable at
+runtime:
 
 ```sh
 insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=16   # defaults shown
@@ -56,25 +56,10 @@ insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=1
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 | `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
-A READ that returns frames is followed immediately by the next, so a live
-download polls back-to-back at the speed of the SCSI round-trip; the cadence
-knobs govern only *empty* polling — how often to probe when no data is waiting.
-The receive ceiling is therefore set by the per-READ round-trip and the adapter,
-not the host poll rate, so the defaults are already near-optimal and the knobs
-are most useful for characterization or on much slower hosts.
-
-`rx_req_len` is headroom for targets that honor a larger request. ZuluSCSI and
-BlueSCSI are both based on SCSI2SD, whose firmware hard-caps a batch at 2 frames,
-so raising it past the default changes nothing on those two — the default 4096
-already covers that 2-frame max batch.
-
-`tx_burst` arbitrates the device's one-command-at-a-time channel: the engine
-sends at most this many queued frames before forcing an RX poll. Since the device
-cannot transmit and receive at once, a large burst favors upload throughput
-(back-to-back WRITEs amortize per-command SCSI overhead) while a small one favors
-RX fairness (inbound ACKs and replies drain sooner instead of overflowing the
-adapter's small RX FIFO while the host holds the bus writing). The default of 16
-tends to be optimal.
+The defaults are already near-optimal — the knobs are mainly for characterization
+or much slower hosts. `tx_burst` trades upload throughput (larger — back-to-back
+WRITEs amortize per-command overhead) against RX fairness (smaller — inbound drains
+before the adapter's RX FIFO overflows); 16 is a good default.
 
 ## Performance
 

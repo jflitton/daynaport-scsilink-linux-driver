@@ -43,10 +43,10 @@ modprobe scsilink     # load now
 
 ## Parameters
 
-There is no RX interrupt, so receive is polled. Three knobs control the RX
-cadence, `rx_req_len` sizes each READ request, and `tx_burst` balances TX against
-RX on the device's single command slot. They are all **writable at runtime** as
-well as settable at load (the poll loop reads them live each cycle):
+The knobs below tune the RX poll cadence, READ request size, and TX/RX arbitration
+(see [How it works](../README.md#how-it-works) for the device behavior they tune).
+On 7.x they are all **writable at runtime** as well as settable at load — the poll
+loop re-reads them live each cycle:
 
 ```sh
 modprobe scsilink poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=16   # at load (defaults shown)
@@ -62,31 +62,17 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 | `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
-A READ that returns frames is followed immediately by the next, so a live transfer
-polls back-to-back at the speed of the SCSI round-trip; the cadence knobs govern
-only *empty* polling — how often to probe when no data is waiting. The defaults are
-already near-optimal; pushing `poll0_ms` toward continuous *empty* polling tends to
-*hurt*, since hammering the adapter with empty READs starves its frame handling.
-The knobs are most useful for characterization and on much slower hosts.
-
-`rx_req_len` is headroom for targets that honor a larger request. ZuluSCSI and
-BlueSCSI are both based on SCSI2SD, whose firmware hard-caps a batch at 2 frames,
-so raising it past the default changes nothing on those two — the default 4096
-already covers that 2-frame max batch.
-
-`tx_burst` arbitrates the device's one-command-at-a-time channel: the poll loop
-sends at most this many frames before forcing an RX poll. Since the device cannot
-transmit and receive at once, a large burst favors upload throughput (back-to-back
-WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
-(inbound ACKs and replies drain sooner instead of overflowing the adapter's small
-RX FIFO while the host holds the bus writing). The default of 16 tends to be optimal.
+The defaults are already near-optimal — the knobs are mainly for characterization
+or much slower hosts. Driving `poll0_ms` toward continuous *empty* polling actually
+*hurts*: hammering the adapter with empty READs starves its frame handling.
+`tx_burst` trades upload throughput (larger — back-to-back WRITEs amortize
+per-command overhead) against RX fairness (smaller — inbound drains before the
+adapter's RX FIFO overflows); 16 is a good default.
 
 ## Performance
-Download runs about 995kB/sec, upload about 1.18MB/sec. Receive has no interrupt —
-nothing signals inbound frames — so it polls for them; with productive READs now
-issued back-to-back instead of on a fixed interval, download runs close to the
-upload rate, trailing it only by the slightly heavier READ round-trip over a WRITE
-on this adapter.
+Download runs about 995kB/sec, upload about 1.18MB/sec on this rig. With productive
+READs issued back-to-back, download runs close to the upload rate, trailing it only
+by the slightly heavier READ round-trip over a WRITE on this adapter.
 
 ## Files
 
