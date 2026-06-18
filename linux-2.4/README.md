@@ -36,7 +36,7 @@ modprobe scsilink                    # load now (or: insmod scsilink.o)
 
 Then bring the interface up as you would any NIC.
 
-## Parameters
+## Performance Tuning
 
 The knobs below tune the RX poll cadence, READ request size, and TX/RX arbitration
 (see [How it works](../README.md#how-it-works) for the device behavior they tune).
@@ -56,15 +56,9 @@ insmod scsilink.o poll_ms=80 poll0_ms=20 fast_hold=16 rx_req_len=4096 tx_burst=1
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 | `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
-The defaults are already near-optimal — the knobs are mainly for characterization
-or much slower hosts. `tx_burst` trades upload throughput (larger — back-to-back
-WRITEs amortize per-command overhead) against RX fairness (smaller — inbound drains
-before the adapter's RX FIFO overflows); 16 is a good default.
-
-## Performance
-
-On the test rig, TX runs ~1.2 MB/s with RX at comparable throughput over the
-polled READ path.
+Measured on my Pentium III test rig: 1 MByte/sec up and down. For this system,
+the defaults are already near-optimal — the knobs are mainly for characterization
+or much slower hosts.
 
 ## Files
 

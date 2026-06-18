@@ -10,6 +10,8 @@ on kernel 7.0.12 (Fedora 44).
 
 ## Install
 
+Download the latest release tarball from the [releases](https://github.com/jflitton/daynaport-scsilink-linux-driver/releases) page or clone this repo.
+
 Needs the running kernel's configured build tree — on most distros the
 `kernel-devel` / `linux-headers` package, symlinked at
 `/lib/modules/$(uname -r)/build` — plus `gcc` and `make`. As root:
@@ -25,7 +27,7 @@ KDIR=/path/to/linux ./install.sh  # ...or build against another kernel tree
 `MODULE_ALIAS_SCSI_DEVICE(TYPE_PROCESSOR)`, so udev autoloads it when the adapter
 is enumerated.
 
-Or by hand:
+Or run the steps by hand:
 
 ```sh
 make                  # build scsilink.ko against /lib/modules/`uname -r`/build
@@ -33,6 +35,8 @@ make KDIR=/usr/src/linux   # ...or against another kernel tree
 make install          # modules_install + depmod (as root)
 modprobe scsilink     # load now
 ```
+
+Then bring the interface up as you would any NIC.
 
 > **Secure Boot:** `make install` tries to sign the module with the kernel's
 > signing key, which the distro `kernel-devel` package does not ship — so you'll
@@ -55,32 +59,16 @@ echo 5 > /sys/module/scsilink/parameters/poll0_ms       # live; takes effect nex
 
 | Param        | Meaning                                                          |
 |--------------|------------------------------------------------------------------|
-| `poll_ms`    | idle interval — between READs when no data is waiting (ms)        |
+| `poll_ms`    | idle interval — between empty READs when no data is waiting (ms)  |
 | `poll0_ms`   | fast interval — between empty READs during the post-activity hold (ms) |
 | `fast_hold`  | empty polls to stay at the fast rate before relaxing to idle      |
 | `rx_req_len` | bytes requested per READ; the device may cap or ignore it (2048–16384) |
 | `tx_burst`   | max frames to send before yielding to one RX poll (1–16)         |
 | `debug`      | log per-READ RX stats every 256 reads (0=off, the default)        |
 
-Measured on the test rig: ~8.25 Mbit/s TX, ~7.75 Mbit/s RX. For this system,
-the defaults are already near-optimal — a `poll0_ms` sweep showed RX is
-flat from ~5–20 ms and actually *degrades* below that (polling harder just floods
-the adapter with empty READs), because the receive ceiling is set by the per-READ
-round-trip and the adapter, not the host poll rate. The knobs are most useful for
-characterization and on much slower hosts.
-
-`rx_req_len` is headroom for targets that honor a larger request. ZuluSCSI and
-BlueSCSI are both based on SCSI2SD, whose firmware hard-caps a batch at 2 frames,
-so raising it past the default changes nothing on those two — the default 4096
-already covers that 2-frame max batch.
-
-`tx_burst` arbitrates the device's one-command-at-a-time channel: the poll loop
-sends at most this many frames before forcing an RX poll. Since the device cannot
-transmit and receive at once, a large burst favors upload throughput (back-to-back
-WRITEs amortize per-command SCSI overhead) while a small one favors RX fairness
-(inbound ACKs and replies drain sooner instead of overflowing the adapter's small
-RX FIFO while the host holds the bus writing). In my test, the default of 16 looks
-to be about right.
+Measured on my AMD A10-7700K test rig: 1 MByte/sec up and down. For this system,
+the defaults are already near-optimal — the knobs are mainly for characterization
+or much slower hosts.
 
 ## Files
 
@@ -88,7 +76,7 @@ to be about right.
 |--------------|-------------------------------------------------------|
 | `scsilink.c` | the driver (`#include`s the shared `lib/daynaport.h`) |
 | `Makefile`   | out-of-tree kbuild module (`obj-m`, `-I../lib`)       |
-| `install.sh` | build + install                                       |
+| `install.sh` | build + install + optional boot wiring                |
 | `CHANGES`    | release history                                       |
 
 ## License
